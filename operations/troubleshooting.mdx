@@ -1,0 +1,198 @@
+---
+title: "Troubleshoot GMP Prometheus export to Cloud Monitoring"
+description: "Fix common GMP Prometheus export issues: invalid location, dropped samples, IAM errors, no metrics appearing in Cloud Monitoring, and elevated pending requests."
+---
+
+When the GCM export pipeline encounters a problem, the GMP Prometheus server either refuses to start or continues running while silently discarding or failing to deliver samples. The sections below cover the most common failure modes, how to identify them, and how to resolve them.
+
+<Note>
+  Enable verbose output by starting the server with `--log.level=debug`. This produces detailed log lines for each export iteration, RPC call, and authentication attempt, and is the fastest way to diagnose an unfamiliar issue.
+</Note>
+
+<AccordionGroup>
+  <Accordion title="Location is set to global">
+    **Symptom**
+
+    The server fails to start and logs an error similar to:
+
+    ```text
+    location must be set to a named Google Cloud region and cannot be set to "global".
+    please choose the Google Cloud region that is physically nearest to your cluster.
+    ```
+
+    **Cause**
+
+    The `location` external label or the `--export.label.location` flag is set to the string `"global"`. GCM requires a concrete regional endpoint and rejects `"global"` as an invalid location.
+
+    **Fix**
+
+    Set `location` to a named Google Cloud region, for example `us-central1`, `europe-west1`, or `asia-east1`. Choose the region that is physically nearest to your cluster to minimize latency.
+
+    ```yaml prometheus.yml
+    global:
+      external_labels:
+        project_id: your-gcp-project-id
+        location: us-central1   # must be a named region, not "global"
+    ```
+
+    Or, equivalently, via the CLI flag:
+
+    ```bash
+    ./prometheus \
+      --export.label.location=us-central1
+    ```
+
+    See [cloud.google.com/compute/docs/regions-zones](https://cloud.google.com/compute/docs/regions-zones) for the full list of valid region names.
+  </Accordion>
+
+  <Accordion title="Samples are being dropped">
+    **Symptom**
+
+    The `gcm_export_samples_dropped_total` counter is increasing. You can check it by querying the `/metrics` endpoint:
+
+    ```bash
+    curl -s http://localhost:9090/metrics | grep gcm_export_samples_dropped_total
+    ```
+
+    **Cause**
+
+    The export pipeline intentionally drops samples that cannot be sent to GCM. The `reason` label on the counter identifies the specific cause for each drop. Common reasons include an unsupported metric type, a metric name that does not map to a valid Cloud Monitoring metric descriptor, or missing required resource labels.
+
+    **Fix**
+
+    Query the drop rate broken down by reason to find the dominant cause:
+
+    ```promql
+    rate(gcm_export_samples_dropped_total[5m])
+    ```
+
+    Inspect the `reason` label in the result and address the root cause:
+
+    - If the reason indicates an unsupported type, check that the metric is a standard Prometheus type (counter, gauge, histogram, summary).
+    - If the reason indicates a missing label, verify that `project_id` and `location` are set in `global.external_labels` or via the corresponding `--export.label.*` flags.
+    - Enable `--log.level=debug` to log the specific metric names and reasons for each drop.
+  </Accordion>
+
+  <Accordion title="Authentication errors / permission denied">
+    **Symptom**
+
+    The `gcm_export_samples_send_errors_total` counter is increasing and log output contains messages such as `permission denied`, `403`, or `unauthenticated`.
+
+    **Cause**
+
+    The process cannot authenticate to the GCM API, or the service account it is using does not have the `roles/monitoring.metricWriter` IAM role on the target GCP project.
+
+    **Fix**
+
+    1. Verify that the service account has the required role:
+
+       ```bash
+       gcloud projects get-iam-policy your-gcp-project-id \
+         --flatten="bindings[].members" \
+         --format="table(bindings.role,bindings.members)" \
+         --filter="bindings.members:prometheus-gmp"
+       ```
+
+       If `roles/monitoring.metricWriter` is not listed, grant it:
+
+       ```bash
+       gcloud projects add-iam-policy-binding your-gcp-project-id \
+         --member="serviceAccount:prometheus-gmp@your-gcp-project-id.iam.gserviceaccount.com" \
+         --role="roles/monitoring.metricWriter"
+       ```
+
+    2. If you are using a JSON key file, make sure the path passed to `--export.credentials-file` exists and is readable by the process user.
+
+       ```bash
+       ./prometheus \
+         --export.credentials-file=/etc/prometheus/gcp-credentials.json
+       ```
+
+    3. On GKE with Workload Identity, confirm that the Kubernetes ServiceAccount annotation and the IAM binding are both in place, and that the pod is using the correct Kubernetes ServiceAccount.
+  </Accordion>
+
+  <Accordion title="No metrics appearing in Cloud Monitoring">
+    **Symptom**
+
+    The server is running without errors, but no data appears in Metrics Explorer under `prometheus.googleapis.com/`.
+
+    **Cause**
+
+    This is most often caused by one of the following: the export pipeline is not sending samples (check `gcm_export_samples_sent_total`), the `project_id` or `location` labels are incorrect, or there is a propagation delay in Cloud Monitoring (newly created metric descriptors can take a few minutes to appear).
+
+    **Fix**
+
+    1. Confirm that `gcm_export_samples_sent_total` is increasing:
+
+       ```bash
+       curl -s http://localhost:9090/metrics | grep gcm_export_samples_sent_total
+       ```
+
+       If the counter is not moving, check `gcm_export_samples_exported_total` and `gcm_export_samples_dropped_total` to determine whether samples are entering the pipeline at all.
+
+    2. Verify that `project_id` and `location` are correctly set and match an existing GCP project and region:
+
+       ```bash
+       curl -s http://localhost:9090/metrics | grep gcm_export_samples_send_errors_total
+       ```
+
+       A non-zero error count with a `project_id` label pointing to an incorrect or nonexistent project is a common cause.
+
+    3. Wait a few minutes. Cloud Monitoring can take up to 2–3 minutes to ingest newly seen metric names and make them visible in Metrics Explorer.
+
+    4. Search Metrics Explorer for `prometheus.googleapis.com` and confirm the target project is selected in the project picker.
+  </Accordion>
+
+  <Accordion title="High pending requests">
+    **Symptom**
+
+    The `gcm_export_pending_requests` gauge is consistently elevated (for example, above 10) and `gcm_export_samples_sent_total` is growing slower than `gcm_export_samples_exported_total`.
+
+    **Cause**
+
+    GCM may be throttling write requests due to quota exhaustion or a high request rate. Each pending request represents an in-flight write RPC that has not yet been acknowledged by GCM.
+
+    **Fix**
+
+    1. Check Cloud Monitoring quota usage in the Google Cloud Console under **IAM & Admin → Quotas** and search for `monitoring.googleapis.com/custom_metric_time_series`.
+
+    2. Reduce the number of concurrent in-flight requests by decreasing the export shard count if your configuration exposes that option.
+
+    3. Increase the batch size so that each RPC carries more samples, reducing total RPC count. Monitor `gcm_export_samples_per_rpc_batch` to understand your current batch fill rate.
+
+    4. If throttling is confirmed, request a quota increase from Google Cloud support or reduce your total scrape volume.
+
+    <Warning>
+      Letting `gcm_export_pending_requests` grow unchecked will eventually cause the export pipeline to block and samples will accumulate in memory. This can lead to high memory usage and increased drop rates if the pipeline falls behind.
+    </Warning>
+  </Accordion>
+
+  <Accordion title="EXTRA_ARGS is deprecated">
+    **Symptom**
+
+    Log output contains a deprecation warning related to `EXTRA_ARGS`, or your startup script passes configuration through an `EXTRA_ARGS` environment variable that is no longer being respected.
+
+    **Cause**
+
+    The `EXTRA_ARGS` mechanism for passing additional flags to the Prometheus binary was deprecated in a previous version of the GMP setup scripts (`google/cmd/prometheus/setup.go`). It is no longer the recommended way to supply runtime flags.
+
+    **Fix**
+
+    Migrate any flags previously passed through `EXTRA_ARGS` to explicit CLI flags on the `prometheus` binary. For example, if you had:
+
+    ```bash
+    EXTRA_ARGS="--web.enable-admin-api --log.level=debug"
+    ```
+
+    Replace it with:
+
+    ```bash
+    ./prometheus \
+      --config.file=/etc/prometheus/prometheus.yml \
+      --web.enable-admin-api \
+      --log.level=debug
+    ```
+
+    Pass flags directly in your container command, Kubernetes pod spec, or systemd unit file instead of relying on the `EXTRA_ARGS` environment variable.
+  </Accordion>
+</AccordionGroup>

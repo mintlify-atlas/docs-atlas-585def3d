@@ -1,0 +1,127 @@
+---
+title: "gcm_export_* metrics: GCM pipeline observability reference"
+description: "All 13 gcm_export_* metrics exposed by GMP Prometheus — counters, gauge, and histograms for monitoring export throughput, sample drops, and send errors."
+---
+
+The GMP Prometheus server exposes a set of `gcm_export_*` metrics that describe the health and throughput of the in-process GCM export pipeline. You can use these metrics to understand how many samples are being exported, how many are dropped, and whether the pipeline is keeping up with your scrape load.
+
+## Metric reference
+
+The following 13 metrics are registered by the `export` package at startup.
+
+<ResponseField name="gcm_export_samples_exported_total" type="Counter">
+  Total number of samples accepted by the exporter at scrape time. This counter increments once per sample handed to the pipeline, before any filtering or batching.
+</ResponseField>
+
+<ResponseField name="gcm_export_exemplars_exported_total" type="Counter">
+  Total number of exemplars accepted by the exporter at scrape time, before filtering or batching.
+</ResponseField>
+
+<ResponseField name="gcm_export_samples_dropped_total" type="CounterVec — label: reason">
+  Total number of exported samples intentionally dropped before being sent to GCM. The `reason` label identifies why the sample was dropped (for example, no matching series selector, unsupported metric type, or label set exceeding GCM limits).
+</ResponseField>
+
+<ResponseField name="gcm_export_exemplars_dropped_total" type="CounterVec — label: reason">
+  Total number of exported exemplars intentionally dropped before being sent to GCM. The `reason` label mirrors the values used by `gcm_export_samples_dropped_total`.
+</ResponseField>
+
+<ResponseField name="gcm_export_samples_sent_total" type="Counter">
+  Total number of samples successfully sent to GCM. Use the ratio of this metric to `gcm_export_samples_exported_total` to measure export efficiency.
+</ResponseField>
+
+<ResponseField name="gcm_export_samples_send_errors_total" type="CounterVec — label: project_id">
+  Total number of errors encountered while sending samples to GCM, broken down by `project_id`. A persistently rising value indicates connectivity or authentication problems with the GCM API.
+</ResponseField>
+
+<ResponseField name="gcm_export_send_iterations_total" type="Counter">
+  Total number of processing iterations of the export send handler. Each iteration drains the pending batch queue and dispatches RPC calls. Use this alongside `gcm_export_samples_sent_total` to understand batch throughput.
+</ResponseField>
+
+<ResponseField name="gcm_export_shard_process_total" type="Counter">
+  Total number of shard retrievals. The export pipeline partitions series into shards; this counter increments each time a shard is polled for pending samples.
+</ResponseField>
+
+<ResponseField name="gcm_export_shard_process_pending_total" type="Counter">
+  Total number of shard retrievals that returned an empty result (no pending samples). A high ratio of `gcm_export_shard_process_pending_total` to `gcm_export_shard_process_total` indicates the pipeline is idle or waiting for data.
+</ResponseField>
+
+<ResponseField name="gcm_export_shard_process_samples_taken" type="Histogram — buckets: 1, 2, 5, 10, 20, 50, 100, 150, 200">
+  Distribution of the number of samples taken from a shard in a single retrieval. Buckets are capped at 200, which is the maximum GCM batch size. A distribution concentrated near 200 indicates the pipeline is running at full batch capacity.
+</ResponseField>
+
+<ResponseField name="gcm_export_pending_requests" type="Gauge">
+  Current number of in-flight gRPC write requests to GCM. A sustained high value may indicate the GCM API is slow to respond or that the network path has high latency.
+</ResponseField>
+
+<ResponseField name="gcm_export_projects_per_batch" type="Histogram — buckets: 1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024">
+  Distribution of the number of distinct GCP project IDs present in a single batch sent to GCM. Multi-project setups will see values above 1.
+</ResponseField>
+
+<ResponseField name="gcm_export_samples_per_rpc_batch" type="Histogram — buckets: 1, 2, 5, 10, 20, 50, 100, 150, 200">
+  Distribution of the number of samples packed into a single RPC batch. Buckets are capped at 200, the GCM write quota limit. A distribution skewed toward lower values suggests the pipeline is not filling batches fully, which may indicate low scrape volume or aggressive shard fragmentation.
+</ResponseField>
+
+## Accessing metrics
+
+The GMP Prometheus server exposes all `gcm_export_*` metrics on its standard `/metrics` endpoint alongside its own internal Prometheus metrics.
+
+```bash
+curl http://localhost:9090/metrics | grep gcm_export_
+```
+
+You can scrape the endpoint with Prometheus itself by adding a `scrape_config` that targets `localhost:9090`:
+
+```yaml
+scrape_configs:
+  - job_name: gmp-self
+    static_configs:
+      - targets: ['localhost:9090']
+```
+
+<Tip>
+  GMP Prometheus scrapes itself by default when you include the standard `prometheus` job. No extra configuration is required if you are already scraping `localhost:9090`.
+</Tip>
+
+## Key ratios
+
+Use the following PromQL expressions to monitor export pipeline health.
+
+**Export efficiency** — fraction of exported samples that were successfully sent to GCM:
+
+```promql
+rate(gcm_export_samples_sent_total[5m])
+  /
+rate(gcm_export_samples_exported_total[5m])
+```
+
+A value near 1.0 means almost all samples are reaching GCM. A lower value indicates drops or send errors.
+
+**Drop rate** — fraction of exported samples intentionally dropped:
+
+```promql
+sum(rate(gcm_export_samples_dropped_total[5m])) by (reason)
+  /
+rate(gcm_export_samples_exported_total[5m])
+```
+
+Break this down by `reason` to identify the primary cause of drops.
+
+**Error rate** — fraction of send attempts that resulted in an error:
+
+```promql
+sum(rate(gcm_export_samples_send_errors_total[5m])) by (project_id)
+  /
+rate(gcm_export_send_iterations_total[5m])
+```
+
+A non-zero and growing error rate warrants investigation into GCM API connectivity, credentials, or quota limits.
+
+**Batch fill ratio** — average samples per RPC batch relative to the 200-sample maximum:
+
+```promql
+rate(gcm_export_samples_sent_total[5m])
+  /
+rate(gcm_export_send_iterations_total[5m])
+```
+
+Values approaching 200 indicate the pipeline is operating at full batch capacity.

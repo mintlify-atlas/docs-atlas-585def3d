@@ -1,0 +1,117 @@
+---
+title: "prw2gcm: forward Prometheus Remote Write 2.x to GCM"
+description: "prw2gcm converts Remote Write 2.x to GCM CreateTimeSeries gRPC calls. Run it as a sidecar alongside any Prometheus-compatible sender to export to GMP."
+---
+
+`prw2gcm` is a lightweight HTTP-to-gRPC proxy that accepts [Prometheus Remote Write 2.x](https://prometheus.io/docs/specs/prw/remote_write_spec_2_0/) requests and forwards the time series to the Google Cloud Monitoring (GCM) API. It is built alongside the GMP Prometheus server in `Dockerfile.google` and lives at `google/cmd/prw2gcm` in the repository.
+
+## Overview
+
+The GMP Prometheus server exports to GCM in-process via the `google/export` pipeline. `prw2gcm` serves a different use case: you can point any Prometheus-compatible sender at it using `remote_write` without modifying the sender binary at all. Common scenarios include:
+
+- Running `prw2gcm` as a **sidecar container** next to an unmodified upstream Prometheus pod.
+- Accepting Remote Write 2.x from third-party Prometheus-compatible systems.
+- Testing GCM export without building the full GMP fork.
+
+When a Remote Write 2.x request arrives, `prw2gcm` decodes the protobuf payload, converts each time series to the GCM `TimeSeries` format, and calls `CreateTimeSeries` on the GCM gRPC API in batches of up to 200 series.
+
+## Running prw2gcm
+
+```bash
+./prw2gcm \
+  --listen-address=:19091 \
+  --gcm.credentials-file=/etc/prometheus/gcp-credentials.json \
+  --gcm.endpoint=monitoring.googleapis.com:443
+```
+
+### CLI flags
+
+| Flag | Default | Description |
+|---|---|---|
+| `--listen-address` | `:19091` | Address on which to expose the Remote Write 2.x handler and `/metrics` endpoint. |
+| `--log.level` | `info` | Log verbosity. Valid values: `debug`, `info`, `warn`, `error`. |
+| `--gcm.credentials-file` | _(empty)_ | Path to a Google service account JSON key file. Leave empty to use Application Default Credentials. |
+| `--gcm.forward-credentials` | `false` | When set, the proxy extracts the Bearer token from the incoming `Authorization` header and forwards it to the GCM gRPC call. See [credential forwarding mode](#credential-forwarding-mode). |
+| `--gcm.endpoint` | `monitoring.googleapis.com:443` | GCM API endpoint to send metric data to. |
+| `--gcm.user-agent-mode` | `unspecified` | Mode label included in the gRPC user agent string. Valid values: `gke`, `kubectl`, `on-prem`, `baremetal`, `unspecified`. |
+
+<Note>
+  `--gcm.credentials-file` and `--gcm.forward-credentials` are mutually exclusive. Setting both causes the proxy to exit with an error.
+</Note>
+
+## Path format
+
+The proxy accepts `POST` requests at the following URL path structure, which mirrors the [GMP Query API](https://cloud.google.com/stackdriver/docs/managed-prometheus/query-api-ui#api-prometheus):
+
+```text
+/v1/projects/PROJECT_ID/location/global/prometheus/api/v1/write
+```
+
+Replace `PROJECT_ID` with your GCP project ID (lowercase letters, digits, and hyphens only). The project ID is extracted from the URL path by the proxy and used as the target for the `CreateTimeSeries` call.
+
+Configure Prometheus `remote_write` to point at this path:
+
+```yaml prometheus.yml
+remote_write:
+  - url: http://localhost:19091/v1/projects/your-gcp-project-id/location/global/prometheus/api/v1/write
+    protobuf_message: io.prometheus.write.v2.Request
+```
+
+## Credential forwarding mode
+
+When `--gcm.forward-credentials` is set, `prw2gcm` does not use a service account key file or Application Default Credentials. Instead it reads the `Authorization: Bearer <token>` header from each incoming HTTP request and forwards that token on the outbound gRPC call to GCM.
+
+This lets you configure authentication entirely in the Prometheus `remote_write` block using Prometheus's native `authorization` or `oauth2` settings:
+
+```yaml prometheus.yml
+remote_write:
+  - url: http://localhost:19091/v1/projects/your-gcp-project-id/location/global/prometheus/api/v1/write
+    protobuf_message: io.prometheus.write.v2.Request
+    authorization:
+      type: Bearer
+      credentials_file: /var/run/secrets/token
+```
+
+<Warning>
+  When using `--gcm.forward-credentials`, the proxy passes the Bearer token in plain text over the incoming HTTP connection. In any environment where the connection between Prometheus and the proxy is not trusted, you must serve the proxy behind TLS to prevent token interception.
+</Warning>
+
+## Using as a Prometheus sidecar
+
+The following Kubernetes pod spec runs `prw2gcm` as a sidecar alongside an unmodified upstream Prometheus container. Both containers share the same pod network, so Prometheus can reach the proxy on `localhost:19091`.
+
+```yaml
+apiVersion: v1
+kind: Pod
+metadata:
+  name: prometheus-with-prw2gcm
+spec:
+  containers:
+    - name: prometheus
+      image: prom/prometheus:latest
+      args:
+        - --config.file=/etc/prometheus/prometheus.yml
+        - --storage.tsdb.path=/prometheus
+      volumeMounts:
+        - name: config
+          mountPath: /etc/prometheus
+
+    - name: prw2gcm
+      image: gcr.io/your-project/prw2gcm:latest
+      args:
+        - --listen-address=:19091
+        - --gcm.credentials-file=/etc/gcp/credentials.json
+      volumeMounts:
+        - name: gcp-credentials
+          mountPath: /etc/gcp
+
+  volumes:
+    - name: config
+      configMap:
+        name: prometheus-config
+    - name: gcp-credentials
+      secret:
+        secretName: gcp-service-account-key
+```
+
+Pair this pod spec with a `prometheus.yml` that sets `remote_write` to the proxy's local address (see [path format](#path-format) above).

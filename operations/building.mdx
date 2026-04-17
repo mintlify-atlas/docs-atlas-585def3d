@@ -1,0 +1,127 @@
+---
+title: "Build the GMP Prometheus Docker image from source code"
+description: "Build GMP Prometheus using Dockerfile.google: vendor deps, compile with BoringCrypto FIPS, and extract the prometheus, promtool, and prw2gcm binaries."
+---
+
+The GoogleCloudPlatform/prometheus repository ships a multi-stage `Dockerfile.google` that produces a minimal distroless image containing three binaries: `prometheus`, `promtool`, and `prw2gcm`. This guide shows you how to build that image from source and how to extract the compiled binaries for use outside of Docker.
+
+## Prerequisites
+
+Before you start, make sure you have the following installed:
+
+- **Docker** with BuildKit support (Docker 23+ has BuildKit enabled by default; for older versions set `DOCKER_BUILDKIT=1`)
+- **Go 1.24 or later** (required if you are building outside Docker)
+- **make** (used by the build scripts for the UI assets)
+
+## Build steps
+
+The `Dockerfile.google` is structured around two primary targets: `vendor` caches all Go and Node.js dependencies, and `app` produces the final runnable image. Build `vendor` first to populate the dependency cache, then build `app`.
+
+<Steps>
+  <Step title="Clone the repository">
+    Clone the GMP fork of Prometheus and enter the directory:
+
+    ```bash
+    git clone https://github.com/GoogleCloudPlatform/prometheus.git
+    cd prometheus
+    ```
+  </Step>
+
+  <Step title="Build and export vendor dependencies">
+    The `vendor` target produces a directory containing Go modules (under `vendor/`) and Node.js modules (under `web/ui/`). Building this target separately lets Docker cache the dependency layer and skip slow `npm install` and `go mod vendor` steps on subsequent builds.
+
+    ```bash
+    DOCKER_BUILDKIT=1 docker build \
+      --target=vendor \
+      -o vendor-out \
+      -f Dockerfile.google \
+      .
+    ```
+
+    After this command completes, `vendor-out/` contains the vendored Go and Node.js dependencies.
+
+    <Tip>
+      Run `--target=vendor` in CI as a dedicated cache-warming step. Because the layer is content-addressed, subsequent `--target=app` builds will reuse it as long as `go.mod`, `go.sum`, and `package-lock.json` have not changed.
+    </Tip>
+  </Step>
+
+  <Step title="Build the application image">
+    Build the full `app` target to compile the UI assets, the Go binaries, and assemble the final distroless image:
+
+    ```bash
+    DOCKER_BUILDKIT=1 docker build \
+      --target=app \
+      -f Dockerfile.google \
+      -t gmp-prometheus:latest \
+      .
+    ```
+
+    The resulting image is based on `gke.gcr.io/gke-distroless/libc` and runs as the `nobody` user, exposing port `9090`.
+  </Step>
+
+  <Step title="Extract the compiled binaries">
+    If you need the binaries outside of the image, copy them out with `docker create` and `docker cp`:
+
+    ```bash
+    id=$(docker create gmp-prometheus:latest)
+    docker cp "$id:/bin/prometheus" ./prometheus
+    docker cp "$id:/bin/promtool"   ./promtool
+    docker cp "$id:/bin/prw2gcm"    ./prw2gcm
+    docker rm "$id"
+    ```
+
+    You now have three standalone binaries:
+
+    | Binary | Description |
+    |--------|-------------|
+    | `prometheus` | The GMP Prometheus server with built-in GCM export |
+    | `promtool` | CLI tool for validating configs and querying TSDB |
+    | `prw2gcm` | Utility for converting Prometheus remote-write to GCM format |
+  </Step>
+</Steps>
+
+## Build arguments
+
+`Dockerfile.google` exposes four `ARG` values that let you pin or override the base images:
+
+| Argument | Default | Description |
+|----------|---------|-------------|
+| `IMAGE_BUILD_GO` | `google-go.pkg.dev/golang:1.24.13` | Go toolchain image used for compilation |
+| `IMAGE_BUILD_NODEJS` | `us-central1-docker.pkg.dev/serverless-runtimes/google-22/runtimes/nodejs22:latest` | Node.js image used to build the Prometheus web UI |
+| `IMAGE_BASE` | `gke.gcr.io/gke-distroless/libc` | Minimal runtime base for the final `app` image |
+| `IMAGE_BASE_DEBUG` | `gcr.io/distroless/base-nossl-debian12:debug` | Debug variant used for the intermediate `appbase` stage that needs a shell to set up symlinks |
+
+Pass these with `--build-arg` to substitute your own images:
+
+```bash
+DOCKER_BUILDKIT=1 docker build \
+  --target=app \
+  -f Dockerfile.google \
+  --build-arg IMAGE_BUILD_GO=google-go.pkg.dev/golang:1.24.13 \
+  --build-arg IMAGE_BASE=gcr.io/distroless/base-nossl-debian12:latest \
+  -t gmp-prometheus:latest \
+  .
+```
+
+## BoringCrypto FIPS build
+
+The `buildbase` stage sets `GOEXPERIMENT=boringcrypto` before invoking `go build`. This enables Go's BoringCrypto backend, which replaces the standard Go crypto library with BoringSSL primitives. All three binaries (`prometheus`, `promtool`, `prw2gcm`) are built with this flag enabled by default.
+
+<Note>
+  `GOFIPS140=off` is also set in the Dockerfile, which means BoringCrypto primitives are compiled in but the FIPS 140 enforcement mode is not activated at runtime. If your compliance requirements demand FIPS enforcement, set `GOFIPS140=latest` (or a specific module version) as a build argument or environment variable.
+</Note>
+
+## Cross-compilation for arm64
+
+The build respects the standard Docker `TARGETARCH` and `TARGETOS` build arguments, so you can cross-compile for `arm64` from an `amd64` host using `--platform`:
+
+```bash
+DOCKER_BUILDKIT=1 docker build \
+  --platform linux/arm64 \
+  --target=app \
+  -f Dockerfile.google \
+  -t gmp-prometheus:arm64 \
+  .
+```
+
+When the target architecture is `arm64` and the build host is not, the `buildbase` stage automatically installs the `gcc-aarch64-linux-gnu` cross-compiler and sets `CC=aarch64-linux-gnu-gcc` before calling `go build`.

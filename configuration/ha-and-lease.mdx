@@ -1,0 +1,127 @@
+---
+title: "HA leader election and Kubernetes lease configuration"
+description: "Configure GMP Prometheus HA so only one replica exports to GCM at a time using a Kubernetes lease. Covers backends, timing flags, RBAC, and fail-open behavior."
+---
+
+When you run multiple Prometheus replicas for redundancy, each replica independently scrapes the same targets and would send duplicate time series to Cloud Monitoring. Duplicate data in GCM can cause conflicts in cumulative (counter) metrics because GCM requires that each time series is written by a single writer with monotonically increasing timestamps. The lease mechanism solves this by ensuring that only one replica — the current lease holder — exports data at any given time.
+
+## How the lease works
+
+The `Lease` interface in `google/export/export.go` defines two key operations:
+
+- **`Range()`** — returns the time range for which the caller currently holds the lease, and a boolean indicating whether the lease is held at all. The exporter calls this on every batch of samples before forwarding them to GCM; samples outside the owned range are dropped.
+- **`Run(ctx)`** — starts background processing (lease renewal, leader election) until the context is cancelled.
+
+When a replica loses the lease (e.g. because another replica acquired it), the series cache is cleared. This prevents the new leader from inheriting stale reset timestamps that would produce write conflicts.
+
+The lease implementation also has a **fail-open** behaviour: if the lease backend becomes temporarily unavailable, the current leader continues to export rather than stopping. This avoids data gaps during transient backend outages but may briefly produce duplicate data if a second replica also fails open simultaneously.
+
+## Available backends
+
+<ParamField path="--export.ha.backend" type="string" default="none">
+  The backend used to coordinate HA pairs. Valid values are `none` and `kube`.
+
+  - **`none`** — No lease is used. Every replica always exports all data. Use this when you run a single Prometheus instance or when deduplication is handled externally.
+  - **`kube`** — Leader election via a Kubernetes `Lease` object. Only the elected leader exports data. All replicas must have access to the same Kubernetes API server.
+</ParamField>
+
+## Kubernetes lease backend
+
+To enable HA with Kubernetes leader election, set `--export.ha.backend=kube` and provide a namespace and name for the lease resource. All replicas in the same HA group must use the **same namespace and name** so they compete for the same lease object.
+
+```bash
+prometheus \
+  --export.ha.backend=kube \
+  --export.ha.kube.namespace=monitoring \
+  --export.ha.kube.name=prometheus-ha-lease \
+  --export.label.project-id=my-project \
+  --export.label.location=us-central1
+```
+
+### Kubernetes lease flags
+
+<ParamField path="--export.ha.kube.config" type="string">
+  Path to a kubeconfig file. When not set, the exporter uses the in-cluster configuration (service account token mounted at `/var/run/secrets/kubernetes.io/serviceaccount`), falling back to the default kubeconfig at `~/.kube/config`.
+</ParamField>
+
+<ParamField path="--export.ha.kube.namespace" type="string">
+  Kubernetes namespace in which the `Lease` object is created or updated. Must be identical across all replicas in the same HA group. Can also be set via the `KUBE_NAMESPACE` environment variable.
+</ParamField>
+
+<ParamField path="--export.ha.kube.name" type="string">
+  Name of the `Lease` object used for leader election. Must be identical across all replicas in the same HA group. Can also be set via the `KUBE_NAME` environment variable.
+</ParamField>
+
+### Timing flags
+
+<ParamField path="--export.ha.lease-duration" type="duration" default="15s">
+  How long a non-leader replica waits before attempting to acquire the lease after it stops observing a change from the current leader. Shorter values reduce the failover time but increase load on the Kubernetes API server. Can also be set via the `LEASE_DURATION` environment variable.
+</ParamField>
+
+<ParamField path="--export.ha.renew-deadline" type="duration" default="10s">
+  How long the current leader retries refreshing the lease before giving up. Must be less than `lease-duration`. Can also be set via the `RENEW_DEADLINE` environment variable.
+</ParamField>
+
+<ParamField path="--export.ha.retry-period" type="duration" default="2s">
+  How long between lease renewal retries for both leaders and non-leaders. Can also be set via the `RETRY_PERIOD` environment variable.
+</ParamField>
+
+## Example: two-replica HA deployment
+
+The following shows a Kubernetes Deployment snippet for a two-replica Prometheus setup with HA export:
+
+```yaml deployment.yaml
+spec:
+  replicas: 2
+  template:
+    spec:
+      containers:
+        - name: prometheus
+          args:
+            - "--export.ha.backend=kube"
+            - "--export.ha.kube.namespace=monitoring"
+            - "--export.ha.kube.name=prometheus-ha"
+            - "--export.label.project-id=my-project"
+            - "--export.label.location=us-central1"
+            - "--export.label.cluster=prod-cluster"
+```
+
+Both replicas scrape the same targets. The one that holds the lease forwards data to GCM; the other scrapes but discards all samples at export time. If the leader pod is evicted or crashes, the other replica acquires the lease within `lease-duration` and resumes exporting.
+
+<Tip>
+  Use a unique lease name per Prometheus deployment. If you run multiple independent Prometheus instances in the same namespace (for example, one per team), each must use a distinct `--export.ha.kube.name` value. Sharing a lease name across unrelated instances causes them to compete for the same lock, leaving only one instance exporting across all teams.
+</Tip>
+
+<Warning>
+  During a network partition, both replicas may temporarily believe they hold the lease (fail-open behaviour). In this scenario, both replicas will export data to GCM for the duration of the partition, producing brief duplicates in Cloud Monitoring. This is a deliberate trade-off to avoid data gaps. Cumulative metrics may produce write errors if two replicas write conflicting start timestamps.
+</Warning>
+
+## RBAC requirements
+
+The Prometheus pod's service account needs permission to create, get, and update `Lease` objects in the target namespace:
+
+```yaml rbac.yaml
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: prometheus-lease
+  namespace: monitoring
+rules:
+  - apiGroups: ["coordination.k8s.io"]
+    resources: ["leases"]
+    verbs: ["get", "create", "update"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: prometheus-lease
+  namespace: monitoring
+subjects:
+  - kind: ServiceAccount
+    name: prometheus
+    namespace: monitoring
+roleRef:
+  kind: Role
+  name: prometheus-lease
+  apiGroup: rbac.authorization.k8s.io
+```

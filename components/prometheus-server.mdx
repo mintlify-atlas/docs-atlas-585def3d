@@ -1,0 +1,77 @@
+---
+title: "GMP Prometheus server: GCM export and configuration"
+description: "GMP Prometheus adds a built-in GCM gRPC export pipeline and hot-reloadable google_cloud config to upstream Prometheus. Supports GKE Workload Identity."
+---
+
+The GMP Prometheus server (`prometheus`) is a fork of the upstream Prometheus binary that adds a built-in export pipeline to Google Cloud Managed Service for Prometheus (GMP). You run it exactly like the upstream server, using the same `prometheus.yml` configuration file and the same CLI flags — the only additions are the `--export.*` flags and an optional `google_cloud` section in your config file.
+
+## What's different from upstream
+
+The GMP fork keeps full compatibility with upstream Prometheus (PromQL, TSDB, alerting, scraping) and adds the following in the `google/` directory of the repository:
+
+- **In-process GCM exporter** (`google/export`): A high-throughput gRPC pipeline that reads from the Prometheus WAL and sends time series to the Cloud Monitoring API (`monitoring.googleapis.com:443`) in batches of up to 200 series. No remote write adapter is required.
+- **Hot-reload support**: Export credentials, metric filters (`export.match`), and query project IDs reload at runtime on `SIGHUP` without restarting the process.
+- **`google_cloud` config section**: An optional top-level block in `prometheus.yml` that lets you configure GCM export options (such as matchers) without using CLI flags.
+- **`google/` package**: All GCP-specific code lives under `google/` to minimize divergence from upstream. The `google/export/setup` package handles flag registration, GCP metadata server discovery, and the global exporter instance.
+
+<Note>
+  This binary is intended as a drop-in replacement for the upstream `prometheus` binary. All upstream CLI flags, API endpoints, and configuration options work unchanged.
+</Note>
+
+## Running the server
+
+Start the server with your config file, TSDB storage path, and the GCP project and location flags. On GKE with Workload Identity, you can omit `--export.credentials-file`.
+
+```bash
+./prometheus \
+  --config.file=/etc/prometheus/prometheus.yml \
+  --storage.tsdb.path=/prometheus \
+  --export.label.project-id=your-gcp-project-id \
+  --export.label.location=us-central1 \
+  --export.credentials-file=/etc/prometheus/gcp-credentials.json
+```
+
+### Key flags
+
+| Flag | Description |
+|---|---|
+| `--config.file` | Path to the Prometheus configuration file. |
+| `--storage.tsdb.path` | Directory for the TSDB data store. |
+| `--export.label.project-id` | GCP project ID to which metrics are exported. Can also be set via the `project_id` external label. |
+| `--export.label.location` | Google Cloud region for the monitored resource (e.g. `us-central1`). Cannot be set to `"global"`. |
+| `--export.credentials-file` | Path to a Google service account JSON key file. Leave empty to use Application Default Credentials. |
+| `--export.disable` | Set to `true` to disable GCM export entirely (useful for local development). |
+| `--export.endpoint` | GCM API endpoint. Defaults to `monitoring.googleapis.com:443`. |
+
+<Tip>
+  On GKE with Workload Identity enabled, you do not need `--export.credentials-file`. Annotate your Kubernetes ServiceAccount with the GCP service account binding and the server will authenticate automatically via the GCE metadata server.
+</Tip>
+
+## Ports
+
+The server listens on port **9090** by default, matching upstream Prometheus.
+
+| Endpoint | Description |
+|---|---|
+| `:9090` | Prometheus UI and HTTP API (PromQL, rules, targets, alerts). |
+| `:9090/metrics` | Internal Prometheus and GCM export pipeline metrics in OpenMetrics format. Use this endpoint to monitor export health. |
+
+To monitor export health, query the following metrics on `/metrics`:
+
+- `gcm_export_samples_exported_total` — samples picked up from the WAL
+- `gcm_export_samples_sent_total` — samples successfully delivered to GCM
+- `gcm_export_samples_send_errors_total` — samples that failed to send
+
+## Environment variables
+
+<AccordionGroup>
+  <Accordion title="EXTRA_ARGS (deprecated)">
+    The `EXTRA_ARGS` environment variable can be used to inject additional CLI flags when the standard flags cannot be easily modified — for example, in container environments where the command line is fixed. The value is parsed as a shell argument string.
+
+    ```bash
+    EXTRA_ARGS="--export.label.project-id=my-project --export.label.location=us-central1"
+    ```
+
+    **This variable is deprecated and will be removed in a future release.** Prefer setting flags directly or through the `Opts` struct in the `google/export/setup` package.
+  </Accordion>
+</AccordionGroup>

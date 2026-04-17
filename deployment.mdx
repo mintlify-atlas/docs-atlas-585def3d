@@ -1,0 +1,215 @@
+---
+title: "Deploy GMP Prometheus on Kubernetes and GKE clusters"
+description: "Build the GMP Prometheus Docker image with Dockerfile.google and run it on Kubernetes using ConfigMaps, credentials Secrets, and a persistent TSDB data volume."
+---
+
+This page covers building the GMP Prometheus container image from source and running it on Kubernetes. The repository ships `Dockerfile.google`, a multi-stage Dockerfile that produces a distroless image containing the `prometheus`, `promtool`, and `prw2gcm` binaries. After building the image you will create the necessary Kubernetes resources: a ConfigMap for `prometheus.yml`, a Secret for GCP credentials (or Workload Identity instead), and a Deployment with the correct volume mounts.
+
+<Steps>
+  <Step title="Build the Docker image">
+    Use `Dockerfile.google` with BuildKit enabled and `--target=app` to build the production image. The build compiles Go with `GOEXPERIMENT=boringcrypto` for FIPS-compliant cryptography and supports multi-architecture builds via `--platform`.
+
+    ```dockerfile Dockerfile.google (key stages)
+    # Build Go binaries with BoringCrypto FIPS support
+    FROM gobase AS buildbase
+    COPY --from=assets /workspace ./
+    ENV GOEXPERIMENT=boringcrypto
+    ENV CGO_ENABLED=1
+    RUN go build -tags builtinassets -mod=vendor \
+        -ldflags="-X github.com/prometheus/common/version.Version=$(cat VERSION) \
+        -X github.com/prometheus/common/version.BuildDate=$(date --iso-8601=seconds)" \
+        ./cmd/prometheus && \
+        go build -mod=vendor ... ./cmd/promtool && \
+        go build -mod=vendor ... ./google/cmd/prw2gcm
+
+    # Final distroless image
+    FROM ${IMAGE_BASE} AS app
+    COPY --from=buildbase /workspace/prometheus /bin/prometheus
+    COPY --from=buildbase /workspace/promtool   /bin/promtool
+    COPY --from=buildbase /workspace/prw2gcm    /bin/prw2gcm
+    ```
+
+    Build the image:
+
+    ```bash
+    DOCKER_BUILDKIT=1 docker build \
+      --target=app \
+      --platform=linux/amd64 \
+      -f Dockerfile.google \
+      -t gcr.io/your-gcp-project-id/prometheus-gmp:2.53.5-gmp.4 \
+      .
+    ```
+
+    Push the image to your registry:
+
+    ```bash
+    docker push gcr.io/your-gcp-project-id/prometheus-gmp:2.53.5-gmp.4
+    ```
+
+    <Note>
+      `Dockerfile.google` accepts two build-time ARGs that pin the base images:
+
+      - `IMAGE_BUILD_GO` — the Go toolchain image used to compile the binaries. Defaults to a pinned `google-go.pkg.dev/golang` image with a specific digest.
+      - `IMAGE_BUILD_NODEJS` — the Node.js image used to build the Prometheus web UI frontend. Defaults to a pinned `us-central1-docker.pkg.dev/serverless-runtimes/google-22/runtimes/nodejs22` image.
+
+      Override these ARGs with `--build-arg IMAGE_BUILD_GO=<image>` if you need to use internally mirrored base images in an air-gapped environment.
+    </Note>
+  </Step>
+
+  <Step title="Configure prometheus.yml">
+    Create a ConfigMap containing your `prometheus.yml`. Make sure the `project_id` and `location` external labels are present — GMP requires them.
+
+    ```yaml configmap.yaml
+    apiVersion: v1
+    kind: ConfigMap
+    metadata:
+      name: prometheus-config
+      namespace: monitoring
+    data:
+      prometheus.yml: |
+        global:
+          scrape_interval: 15s
+          evaluation_interval: 15s
+          external_labels:
+            project_id: your-gcp-project-id
+            location: us-central1
+
+        scrape_configs:
+          - job_name: "prometheus"
+            static_configs:
+              - targets: ["localhost:9090"]
+    ```
+
+    Apply the ConfigMap:
+
+    ```bash
+    kubectl apply -f configmap.yaml
+    ```
+  </Step>
+
+  <Step title="Create a Kubernetes Secret for GCP credentials">
+    If you are not using Workload Identity, create a Kubernetes Secret from your service account JSON key file:
+
+    ```bash
+    kubectl create secret generic gcp-credentials \
+      --namespace=monitoring \
+      --from-file=key.json=/path/to/gcp-credentials.json
+    ```
+
+    <Tip>
+      On GKE with Workload Identity enabled, you do not need a credentials Secret. Instead, annotate the Kubernetes ServiceAccount used by the Prometheus Pod with the GCP service account email:
+
+      ```bash
+      kubectl annotate serviceaccount prometheus \
+        --namespace=monitoring \
+        iam.gke.io/gcp-service-account=prometheus-gmp@your-gcp-project-id.iam.gserviceaccount.com
+      ```
+
+      Then bind the Kubernetes ServiceAccount to the GCP service account:
+
+      ```bash
+      gcloud iam service-accounts add-iam-policy-binding \
+        prometheus-gmp@your-gcp-project-id.iam.gserviceaccount.com \
+        --role="roles/iam.workloadIdentityUser" \
+        --member="serviceAccount:your-gcp-project-id.svc.id.goog[monitoring/prometheus]"
+      ```
+
+      With Workload Identity, omit the `--export.credentials-file` flag and the `gcp-credentials` volume from the Deployment manifest below.
+    </Tip>
+  </Step>
+
+  <Step title="Deploy as a Kubernetes Deployment">
+    Apply the following manifest. It mounts the ConfigMap as the Prometheus configuration file, the credentials Secret as a volume, and uses a persistent volume for TSDB data.
+
+    ```yaml deployment.yaml
+    apiVersion: apps/v1
+    kind: Deployment
+    metadata:
+      name: prometheus
+      namespace: monitoring
+    spec:
+      replicas: 1
+      selector:
+        matchLabels:
+          app: prometheus
+      template:
+        metadata:
+          labels:
+            app: prometheus
+        spec:
+          serviceAccountName: prometheus
+          containers:
+            - name: prometheus
+              image: gcr.io/your-gcp-project-id/prometheus-gmp:2.53.5-gmp.4
+              args:
+                - "--config.file=/etc/prometheus/prometheus.yml"
+                - "--storage.tsdb.path=/prometheus"
+                - "--web.console.libraries=/usr/share/prometheus/console_libraries"
+                - "--web.console.templates=/usr/share/prometheus/consoles"
+                - "--export.label.project-id=your-gcp-project-id"
+                - "--export.label.location=us-central1"
+                - "--export.credentials-file=/etc/gcp/key.json"
+              ports:
+                - name: web
+                  containerPort: 9090
+              volumeMounts:
+                - name: config
+                  mountPath: /etc/prometheus
+                - name: gcp-credentials
+                  mountPath: /etc/gcp
+                  readOnly: true
+                - name: data
+                  mountPath: /prometheus
+          volumes:
+            - name: config
+              configMap:
+                name: prometheus-config
+            - name: gcp-credentials
+              secret:
+                secretName: gcp-credentials
+            - name: data
+              emptyDir: {}
+    ```
+
+    Apply the manifest:
+
+    ```bash
+    kubectl apply -f deployment.yaml
+    ```
+
+    For production workloads, replace the `emptyDir` data volume with a `PersistentVolumeClaim` to retain TSDB data across Pod restarts. Consider using a `StatefulSet` instead of a `Deployment` to get stable Pod identity and easier PVC management.
+  </Step>
+
+  <Step title="Expose the service on port 9090">
+    Create a Service so you can reach the Prometheus UI and `/metrics` endpoint from within the cluster:
+
+    ```yaml service.yaml
+    apiVersion: v1
+    kind: Service
+    metadata:
+      name: prometheus
+      namespace: monitoring
+    spec:
+      selector:
+        app: prometheus
+      ports:
+        - name: web
+          port: 9090
+          targetPort: web
+    ```
+
+    Apply the Service:
+
+    ```bash
+    kubectl apply -f service.yaml
+    ```
+
+    Access the Prometheus UI by port-forwarding to your local machine:
+
+    ```bash
+    kubectl port-forward svc/prometheus 9090:9090 -n monitoring
+    ```
+
+    Then open `http://localhost:9090` in your browser. Navigate to `http://localhost:9090/metrics` and search for `gcm_export_samples_exported_total` to confirm the export pipeline is active.
+  </Step>
+</Steps>

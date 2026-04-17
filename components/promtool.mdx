@@ -1,0 +1,174 @@
+---
+title: "promtool: validate configs and manage Prometheus TSDB"
+description: "promtool validates config and rule files, runs unit tests, queries a live server, analyzes TSDB blocks, backfills recording rules, and collects debug profiles."
+---
+
+`promtool` is the command-line utility bundled with Prometheus for validating configuration, testing alerting and recording rules, querying a live server, and performing TSDB maintenance tasks. The GMP Prometheus fork ships the same `promtool` binary as upstream — no GMP-specific changes have been made to it.
+
+<Note>
+  `promtool` is the standard upstream Prometheus tool. It works identically with the GMP Prometheus server because the server is API-compatible with upstream Prometheus.
+</Note>
+
+## Commands
+
+<AccordionGroup>
+  <Accordion title="check — validate configuration and rules">
+    Validate Prometheus configuration files, rule files, metrics output, and web configuration.
+
+    ```bash
+    # Check one or more configuration files
+    promtool check config prometheus.yml
+
+    # Check rule files
+    promtool check rules rules/*.yml
+
+    # Check metrics output from a file or stdin
+    cat /tmp/metrics.txt | promtool check metrics
+
+    # Check TLS/auth web config
+    promtool check web-config web-config.yml
+
+    # Run service discovery for a specific job and print results
+    promtool check service-discovery prometheus.yml my-job
+    ```
+
+    Useful flags for `check config`:
+    - `--syntax-only`: skip file and content validation, only check YAML syntax
+    - `--lint=duplicate-rules` (default) or `--lint=all` / `--lint=none`
+    - `--lint-fatal`: exit with code 3 on lint warnings
+    - `--agent`: validate config for Prometheus Agent mode
+  </Accordion>
+
+  <Accordion title="query — run PromQL against a live server">
+    Execute instant queries, range queries, series lookups, and label queries against a running Prometheus server.
+
+    ```bash
+    # Instant query
+    promtool query instant http://localhost:9090 'up'
+
+    # Range query
+    promtool query range http://localhost:9090 'rate(http_requests_total[5m])' \
+      --start=2024-01-01T00:00:00Z \
+      --end=2024-01-01T01:00:00Z \
+      --step=60s
+
+    # List series matching selectors
+    promtool query series http://localhost:9090 \
+      --match='{job="prometheus"}'
+
+    # List label values
+    promtool query labels http://localhost:9090 job
+
+    # Analyze histogram metric usage patterns
+    promtool query analyze \
+      --server=http://localhost:9090 \
+      --type=histogram \
+      --match='{__name__=~"http_request_duration.*"}'
+    ```
+
+    Use `--format=json` on the `query` subcommand to get machine-readable output.
+  </Accordion>
+
+  <Accordion title="test — unit-test alerting and recording rules">
+    Run unit tests for rules using test files that define input series and expected outputs.
+
+    ```bash
+    promtool test rules tests/rules_test.yml tests/alerts_test.yml
+    ```
+
+    Use `--run` to run only test groups whose names match a regular expression:
+
+    ```bash
+    promtool test rules --run="HttpErrorRate" tests/alerts_test.yml
+    ```
+
+    Use `--diff` (experimental) to see a colored differential between expected and received output.
+  </Accordion>
+
+  <Accordion title="tsdb — analyze and manage TSDB blocks">
+    Inspect, dump, and manage the on-disk TSDB data directory.
+
+    ```bash
+    # Analyze churn, label cardinality, and compaction efficiency
+    promtool tsdb analyze ./data/
+
+    # List all TSDB blocks
+    promtool tsdb list --human-readable ./data/
+
+    # Dump all samples from a TSDB
+    promtool tsdb dump ./data/
+
+    # Create TSDB blocks from OpenMetrics input (experimental)
+    promtool tsdb create-blocks-from openmetrics input.om ./data/
+
+    # Backfill recording rules against historical data
+    promtool tsdb create-blocks-from rules \
+      --url=http://localhost:9090 \
+      --start=2024-01-01T00:00:00Z \
+      --end=2024-01-02T00:00:00Z \
+      --output-dir=./backfill-out/ \
+      recording_rules.yml
+    ```
+  </Accordion>
+
+  <Accordion title="debug — collect profiling and diagnostic data">
+    Fetch profiling (pprof), metrics, or all debug information from a running server.
+
+    ```bash
+    # Fetch all debug info (pprof + metrics) and write to a local directory
+    promtool debug all http://localhost:9090
+
+    # Fetch only pprof profiles
+    promtool debug pprof http://localhost:9090
+
+    # Fetch only the /metrics snapshot
+    promtool debug metrics http://localhost:9090
+    ```
+  </Accordion>
+
+  <Accordion title="push — push metrics via remote write (testing only)">
+    Push metrics from a file to a Prometheus remote write endpoint. Intended for testing purposes.
+
+    ```bash
+    promtool push metrics http://localhost:9090/api/v1/write \
+      --label=job=my-job \
+      metrics.txt
+    ```
+  </Accordion>
+</AccordionGroup>
+
+## Common workflows
+
+<Steps>
+  <Step title="Validate config before reloading">
+    Always check your configuration before sending `SIGHUP` to avoid a bad reload that disables scraping.
+
+    ```bash
+    promtool check config prometheus.yml
+    ```
+
+    Exit code 0 means valid. Exit code 1 means an error was found. Exit code 3 means lint warnings were found (when `--lint-fatal` is set).
+  </Step>
+
+  <Step title="Test rules in CI">
+    Write rule unit test files alongside your recording and alerting rules, then run them in your CI pipeline.
+
+    ```bash
+    promtool test rules tests/*.yml
+    ```
+  </Step>
+
+  <Step title="Backfill recording rules over historical data">
+    If you add a new recording rule and want to populate it over past data held in TSDB, use `tsdb create-blocks-from rules`.
+
+    ```bash
+    promtool tsdb create-blocks-from rules \
+      --url=http://localhost:9090 \
+      --start=2024-01-01T00:00:00Z \
+      --output-dir=./backfill/ \
+      rules/recording.yml
+    ```
+
+    Copy the generated blocks into your TSDB data directory and restart (or reload) Prometheus.
+  </Step>
+</Steps>

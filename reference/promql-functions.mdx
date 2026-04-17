@@ -1,0 +1,203 @@
+---
+title: "PromQL built-in functions: rate, histogram_quantile"
+description: "Reference for PromQL functions in GMP Prometheus: rate, irate, increase, delta, deriv, predict_linear, histogram_quantile, label_replace, absent, and changes."
+---
+
+PromQL provides a set of built-in functions for computing rates, transforming histograms, manipulating labels, and predicting future values. This page documents the most commonly used functions with their syntax and practical examples. All functions described here are available in GMP Prometheus without modification, as GMP uses the same PromQL engine as upstream Prometheus.
+
+## Rate and counter functions
+
+These functions operate on range vectors of counter metrics. Counters only increase (until a reset), so these functions handle resets automatically.
+
+### rate
+
+Computes the per-second average rate of increase of a counter over the provided range. This is the standard function for graphing counter-based metrics.
+
+**Syntax:** `rate(v range-vector)`
+
+```promql
+# Requests per second over the last 5 minutes
+rate(http_requests_total[5m])
+
+# GCM samples sent per second
+rate(gcm_export_samples_sent_total[5m])
+```
+
+Use `rate` when you want a smooth, averaged rate. The range window should be at least four times the scrape interval to produce stable results.
+
+### irate
+
+Computes the instantaneous per-second rate using only the last two samples in the range. This produces a more reactive but noisier result than `rate`.
+
+**Syntax:** `irate(v range-vector)`
+
+```promql
+# Instantaneous request rate — more sensitive to spikes
+irate(http_requests_total[5m])
+```
+
+Use `irate` when you need to detect short-lived spikes that would be averaged away by `rate`. The range window only affects which samples are eligible; the calculation always uses the last two.
+
+### increase
+
+Returns the total increase of a counter over the provided range. This is equivalent to `rate(v[d]) * d` but expressed as a total count rather than a per-second rate.
+
+**Syntax:** `increase(v range-vector)`
+
+```promql
+# Total requests in the last hour
+increase(http_requests_total[1h])
+
+# Total GCM send errors in the last 10 minutes
+increase(gcm_export_samples_send_errors_total[10m])
+```
+
+## Gauge functions
+
+These functions operate on range vectors of gauge metrics (values that can increase or decrease).
+
+### delta
+
+Returns the difference between the last value and the first value of a gauge over the range. Unlike `increase`, `delta` does not extrapolate and is not suitable for counters.
+
+**Syntax:** `delta(v range-vector)`
+
+```promql
+# Change in pending GCM requests over 10 minutes
+delta(gcm_export_pending_requests[10m])
+```
+
+### deriv
+
+Computes the per-second derivative of a gauge using simple linear regression over the provided range. This is more robust to noise than `delta` divided by the range duration.
+
+**Syntax:** `deriv(v range-vector)`
+
+```promql
+# Rate of change of pending requests — positive means backlog is growing
+deriv(gcm_export_pending_requests[10m])
+```
+
+### predict\_linear
+
+Predicts the future value of a gauge `t` seconds from now, based on a linear regression over the provided range.
+
+**Syntax:** `predict_linear(v range-vector, t scalar)`
+
+```promql
+# Predict disk usage in 4 hours based on the last hour's trend
+predict_linear(node_filesystem_free_bytes[1h], 4 * 3600)
+```
+
+Use this function to trigger alerts before a resource is exhausted.
+
+## Histogram functions
+
+### histogram\_quantile
+
+Computes the φ-quantile (0 ≤ φ ≤ 1) from a set of histogram buckets. Histograms in Prometheus are cumulative, so this function uses the `_bucket` series produced by a `Histogram` metric.
+
+**Syntax:** `histogram_quantile(φ scalar, v instant-vector)`
+
+```promql
+# 99th percentile of request latency
+histogram_quantile(0.99, rate(http_request_duration_seconds_bucket[5m]))
+
+# 50th percentile of GCM samples taken per shard retrieval
+histogram_quantile(0.50, rate(gcm_export_shard_process_samples_taken_bucket[5m]))
+
+# 95th percentile of GCM samples per RPC batch
+histogram_quantile(0.95, rate(gcm_export_samples_per_rpc_batch_bucket[5m]))
+```
+
+Always wrap the `_bucket` vector with `rate` when computing quantiles over a live counter. Pass the full set of `le`-labeled bucket series — do not pre-filter by label before passing to `histogram_quantile`.
+
+<Tip>
+  When aggregating histograms across instances, sum the rate of each bucket first, then compute the quantile:
+
+  ```promql
+  histogram_quantile(
+    0.99,
+    sum by (le) (rate(http_request_duration_seconds_bucket[5m]))
+  )
+  ```
+</Tip>
+
+## Label manipulation functions
+
+### label\_replace
+
+Creates a new label or rewrites an existing one by applying a regular expression to a source label.
+
+**Syntax:** `label_replace(v instant-vector, dst_label string, replacement string, src_label string, regex string)`
+
+The `regex` is matched against the value of `src_label`. If it matches, the `dst_label` is set to `replacement`, where `$1`, `$2`, etc. refer to capture groups. Series where the regex does not match are returned unchanged.
+
+```promql
+# Extract just the hostname from an instance label like "host:9090"
+label_replace(
+  up,
+  "host", "$1", "instance", "([^:]+):.*"
+)
+
+# Add a static label to all series
+label_replace(
+  gcm_export_samples_sent_total,
+  "env", "production", "", ""
+)
+```
+
+## Type conversion functions
+
+### vector
+
+Converts a scalar value to a single-element instant vector with no labels. This is useful for combining a scalar with an instant vector in a binary operation.
+
+**Syntax:** `vector(s scalar)`
+
+```promql
+# Always returns a series with value 1
+vector(1)
+
+# Useful as a denominator guard
+rate(http_requests_total[5m]) / vector(1)
+```
+
+### scalar
+
+Converts a single-element instant vector to a scalar. If the vector contains more or fewer than exactly one element, the result is `NaN`.
+
+**Syntax:** `scalar(v instant-vector)`
+
+```promql
+scalar(count(up))
+```
+
+## Absence and change detection
+
+### absent
+
+Returns a vector with a single element (value 1) if the input vector has no time series. Returns an empty vector if any series are present. Use this to alert when an expected metric stops being scraped.
+
+**Syntax:** `absent(v instant-vector)`
+
+```promql
+# Alert if the GCM export metric disappears
+absent(gcm_export_samples_sent_total)
+
+# Alert if a specific job has no up series
+absent(up{job="api-server"})
+```
+
+### changes
+
+Returns the number of times the value of a gauge changed within the provided range.
+
+**Syntax:** `changes(v range-vector)`
+
+```promql
+# How many times did pending GCM requests change in the last 5 minutes?
+changes(gcm_export_pending_requests[5m])
+```
+
+This function is useful for detecting instability — a high `changes` count on a gauge that should be stable may indicate a problem.

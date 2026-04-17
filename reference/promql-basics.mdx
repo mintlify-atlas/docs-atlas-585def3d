@@ -1,0 +1,178 @@
+---
+title: "PromQL basics: selectors, operators, and aggregations"
+description: "PromQL for GMP Prometheus: instant vectors, range vectors, label matchers, rate(), aggregation operators, and binary operators with GCM export metric examples."
+---
+
+PromQL (Prometheus Query Language) is the expression language you use to select, aggregate, and transform time series data stored in Prometheus. GMP Prometheus uses the same PromQL engine as upstream Prometheus, so every expression that works in Prometheus works in GMP without modification. This page introduces the core building blocks: instant vectors, range vectors, label matchers, operators, and aggregations.
+
+<Note>
+  PromQL queries run against the local Prometheus TSDB. To query metrics stored in Google Cloud Monitoring directly, use the GMP Query API. See the GMP Query API documentation for details.
+</Note>
+
+## Instant vectors
+
+An instant vector is a set of time series, each with a single sample at the evaluation timestamp. The simplest instant vector is a bare metric name:
+
+```promql
+up
+```
+
+This returns one sample per scrape target, with a value of `1` (target reachable) or `0` (target unreachable).
+
+You can filter series by label using curly braces:
+
+```promql
+up{job="prometheus"}
+```
+
+This returns only the `up` series where the `job` label equals `"prometheus"`.
+
+## Label matchers
+
+Label matchers narrow which time series are selected. Four matcher operators are available:
+
+| Operator | Meaning |
+|---|---|
+| `=` | Exact match |
+| `!=` | Exact non-match |
+| `=~` | Regular expression match |
+| `!~` | Regular expression non-match |
+
+```promql
+# Exact match
+http_requests_total{job="api-server"}
+
+# Regular expression — all jobs starting with "api"
+http_requests_total{job=~"api.*"}
+
+# Exclude a specific instance
+http_requests_total{instance!="10.0.0.1:9090"}
+
+# Exclude instances matching a pattern
+http_requests_total{instance!~"10\\.0\\..*"}
+```
+
+Regular expressions are anchored at both ends, so `=~"api"` matches only the literal string `"api"`, not `"api-server"`. Use `=~"api.*"` to match a prefix.
+
+## Range vectors
+
+A range vector selects samples over a time window rather than at a single point in time. You specify the window in square brackets:
+
+```promql
+http_requests_total[5m]
+```
+
+This selects all samples of `http_requests_total` from the past five minutes for each series. Range vectors cannot be graphed directly — they are the input to range functions like `rate`.
+
+Supported duration units: `ms` (milliseconds), `s` (seconds), `m` (minutes), `h` (hours), `d` (days), `w` (weeks), `y` (years).
+
+## Rate and counter functions
+
+The `rate` function computes the per-second average rate of increase of a counter over a range vector, correctly handling counter resets:
+
+```promql
+rate(http_requests_total{job="api-server"}[5m])
+```
+
+Use `rate` for smooth, averaged rates. For GCM export monitoring:
+
+```promql
+rate(gcm_export_samples_sent_total[5m])
+```
+
+This shows how many samples per second the pipeline is successfully sending to GCM.
+
+## Aggregation operators
+
+Aggregation operators combine multiple series into fewer series by applying a function across the label set.
+
+```promql
+# Sum across all series
+sum(rate(http_requests_total[5m]))
+
+# Sum, keeping the job label in the result
+sum by (job) (rate(http_requests_total[5m]))
+
+# Sum, dropping the instance label (keep all others)
+sum without (instance) (rate(http_requests_total[5m]))
+
+# Average
+avg by (job) (rate(http_requests_total[5m]))
+
+# Maximum
+max by (job) (rate(http_requests_total[5m]))
+
+# Minimum
+min by (job) (rate(http_requests_total[5m]))
+
+# Count of series
+count by (job) (up)
+```
+
+The `by` clause specifies which labels to preserve in the output. The `without` clause specifies which labels to remove; all remaining labels are preserved. You must use one or the other — not both.
+
+## Binary operators
+
+Binary operators combine two instant vectors element-by-element, matching series by their label sets.
+
+**Arithmetic operators:**
+
+```promql
+# Compute the drop fraction
+gcm_export_samples_dropped_total / gcm_export_samples_exported_total
+```
+
+Supported arithmetic operators: `+`, `-`, `*`, `/`, `%`, `^`.
+
+**Comparison operators:**
+
+```promql
+# Select series where the value exceeds a threshold
+rate(gcm_export_samples_send_errors_total[5m]) > 0
+```
+
+Supported comparison operators: `==`, `!=`, `>`, `<`, `>=`, `<=`.
+
+By default, comparison operators filter series: only series where the comparison is true are returned. Use `bool` to return `0` or `1` instead of filtering:
+
+```promql
+up == bool 1
+```
+
+**Matching modifiers:**
+
+When the two sides of a binary operator have different label sets, use `on` or `ignoring` to control which labels are used for matching:
+
+```promql
+# Match only on job label
+rate(gcm_export_samples_sent_total[5m])
+  /
+on (job) rate(gcm_export_samples_exported_total[5m])
+```
+
+## Practical GMP examples
+
+Monitor the export pipeline with instant vector arithmetic:
+
+```promql
+# Export success ratio
+rate(gcm_export_samples_sent_total[5m])
+  /
+rate(gcm_export_samples_exported_total[5m])
+
+# Drop rate by reason
+sum by (reason) (rate(gcm_export_samples_dropped_total[5m]))
+
+# Pending in-flight GCM requests
+gcm_export_pending_requests
+```
+
+Check overall scrape health:
+
+```promql
+# Number of reachable targets per job
+sum by (job) (up)
+
+# Fraction of targets currently up
+avg by (job) (up)
+```

@@ -1,97 +1,65 @@
 ---
-title: "Introduction"
-description: "Welcome to the new home for your documentation"
+title: "GMP Prometheus: Prometheus with native Google Cloud export"
+description: "GMP Prometheus forks upstream Prometheus to add a built-in GCM gRPC export pipeline, Remote Write 2.x proxy, HA lease, and Kubernetes secrets integration."
 ---
 
-## Setting up
+GMP Prometheus extends the upstream Prometheus monitoring system with native, in-process export of metrics to [Google Cloud Managed Service for Prometheus](https://cloud.google.com/stackdriver/docs/managed-prometheus). It runs as a drop-in replacement for the standard Prometheus server — keeping full PromQL, alerting, and TSDB compatibility — while adding a high-throughput gRPC export pipeline to Cloud Monitoring (GCM), a Remote Write 2.x proxy (`prw2gcm`), Kubernetes-native secret management, and optional HA lease-based leader election.
 
-Get your documentation site up and running in minutes.
-
-<Card
-  title="Start here"
-  icon="rocket"
-  href="/quickstart"
-  horizontal
->
-  Follow our three step quickstart guide.
-</Card>
-
-## Make it yours
-
-Design a docs site that looks great and empowers your users.
-
-<Columns cols={2}>
-  <Card
-    title="Edit locally"
-    icon="pen-to-square"
-    href="/development"
-  >
-    Edit your docs locally and preview them in real time.
+<CardGroup cols={2}>
+  <Card title="Quickstart" icon="rocket" href="/quickstart">
+    Deploy GMP Prometheus and start exporting metrics to Google Cloud in minutes.
   </Card>
-  <Card
-    title="Customize your site"
-    icon="palette"
-    href="/essentials/settings"
-  >
-    Customize the design and colors of your site to match your brand.
+  <Card title="Deployment guide" icon="server" href="/deployment">
+    Build the Docker image and deploy the GMP Prometheus server to Kubernetes or GKE.
   </Card>
-    <Card
-    title="Set up navigation"
-    icon="map"
-    href="/essentials/navigation"
-  >
-    Organize your docs to help users find what they need and succeed with your product.
+  <Card title="GMP export configuration" icon="gear" href="/configuration/gmp-export">
+    Configure credentials, metric filtering, compression, and project routing for GCM export.
   </Card>
-  <Card
-    title="API documentation"
-    icon="terminal"
-    href="/api-reference/introduction"
-  >
-    Auto-generate API documentation from OpenAPI specifications.
+  <Card title="prw2gcm proxy" icon="arrow-right-arrow-left" href="/components/prw2gcm-proxy">
+    Run the Remote Write 2.x to GCM proxy as a Prometheus sidecar without modifying the server.
   </Card>
-</Columns>
+  <Card title="CLI flags reference" icon="terminal" href="/reference/cli-flags">
+    Full reference for all GMP-specific CLI flags added to the Prometheus server binary.
+  </Card>
+  <Card title="Exported metrics" icon="chart-line" href="/reference/metrics">
+    Internal GCM export pipeline metrics exposed by the server for monitoring export health.
+  </Card>
+</CardGroup>
 
-## Create beautiful pages
+## What GMP Prometheus adds to upstream
 
-Everything you need to create world-class documentation.
+<CardGroup cols={2}>
+  <Card title="In-process GCM export" icon="cloud-arrow-up">
+    Metrics are exported directly from the Prometheus WAL to Cloud Monitoring via gRPC — no extra remote write adapter needed.
+  </Card>
+  <Card title="Remote Write 2.x proxy" icon="network-wired">
+    The `prw2gcm` binary accepts Remote Write 2.x from any Prometheus-compatible sender and forwards to GCM.
+  </Card>
+  <Card title="Hot-reloadable config" icon="rotate">
+    Export credentials, metric filters, and query project IDs reload at runtime via SIGHUP without restarting.
+  </Card>
+  <Card title="Kubernetes secrets" icon="key">
+    A Kubernetes secret provider gives each scrape target its own credentials via a native K8s watch loop.
+  </Card>
+</CardGroup>
 
-<Columns cols={2}>
-  <Card
-    title="Write with MDX"
-    icon="pen-fancy"
-    href="/essentials/markdown"
-  >
-    Use MDX to style your docs pages.
-  </Card>
-  <Card
-    title="Code samples"
-    icon="code"
-    href="/essentials/code"
-  >
-    Add sample code to demonstrate how to use your product.
-  </Card>
-  <Card
-    title="Images"
-    icon="image"
-    href="/essentials/images"
-  >
-    Display images and other media.
-  </Card>
-  <Card
-    title="Reusable snippets"
-    icon="recycle"
-    href="/essentials/reusable-snippets"
-  >
-    Write once and reuse across your docs.
-  </Card>
-</Columns>
+## Get started
 
-## Need inspiration?
+<Steps>
+  <Step title="Set external labels">
+    Add `project_id` and `location` to `global.external_labels` in your `prometheus.yml`. GMP requires these to route metrics correctly.
+  </Step>
+  <Step title="Configure GCM credentials">
+    Pass `--export.credentials-file` pointing to a Google service account JSON key, or use Workload Identity on GKE.
+  </Step>
+  <Step title="Run the server">
+    Start the GMP Prometheus binary with your project and location flags set.
+  </Step>
+  <Step title="Verify export">
+    Check `gcm_export_samples_exported_total` on the `/metrics` endpoint to confirm samples are flowing to Cloud Monitoring.
+  </Step>
+</Steps>
 
-<Card
-  title="See complete examples"
-  icon="stars"
-  href="https://mintlify.com/customers"
->
-  Browse our showcase of exceptional documentation sites.
-</Card>
+<Note>
+  This repository is a fork of [github.com/prometheus/prometheus](https://github.com/prometheus/prometheus). The `main` branch tracks upstream Prometheus. GMP-specific additions live under the `google/` directory and in select GMP release branches.
+</Note>

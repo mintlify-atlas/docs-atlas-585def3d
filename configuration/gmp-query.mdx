@@ -1,0 +1,64 @@
+---
+title: "Configure GMP query settings for the rule evaluator"
+description: "GoogleCloudQueryConfig fields for the GMP rule-evaluator: project_id to query Cloud Monitoring, generator_url for alert links, and service account credentials."
+---
+
+The `google_cloud.query` section of `prometheus.yml` is not used directly by the GMP Prometheus fork. It is read by the separate **prometheus-engine rule-evaluator**, which uses a full `prometheus.yml` as its configuration file and needs to know which GCP project to query, what URL to embed in generated alerts, and optionally which credentials to use. The `query` config is hosted in the `google_cloud` block alongside the `export` config for historical reasons — both were combined into a single config entry early in the project's history.
+
+<Note>
+  If you are configuring only the GMP Prometheus fork (the scraping binary) and not the rule-evaluator, you can omit the `google_cloud.query` section entirely.
+</Note>
+
+## Configuration
+
+Add a `google_cloud.query` block to your `prometheus.yml`:
+
+```yaml prometheus.yml
+google_cloud:
+  query:
+    project_id: my-project
+    generator_url: https://prometheus.example.com
+    credentials: /var/secrets/google/query-key.json
+```
+
+### Fields
+
+<ParamField path="google_cloud.query.project_id" type="string">
+  The GCP project ID that the rule-evaluator queries when evaluating recording and alerting rules against Cloud Monitoring. This is typically the same project that metrics are exported to, but can differ if you are reading from a centralized monitoring project.
+</ParamField>
+
+<ParamField path="google_cloud.query.generator_url" type="string">
+  The URL embedded in the `generatorURL` field of alerts fired by the rule-evaluator. Alertmanager uses this URL to provide a link back to the expression that produced the alert. Set this to the public base URL of your rule-evaluator or Prometheus instance.
+</ParamField>
+
+<ParamField path="google_cloud.query.credentials" type="string">
+  Path to a service account JSON file used by the rule-evaluator to authenticate queries against the Cloud Monitoring API. When not set, Application Default Credentials are used.
+</ParamField>
+
+## Full example
+
+The following shows a complete `prometheus.yml` that configures both export and query settings together, as would be used with the rule-evaluator:
+
+```yaml prometheus.yml
+global:
+  external_labels:
+    project_id: my-project
+    location: us-central1
+    cluster: prod-cluster
+
+google_cloud:
+  export:
+    compression: gzip
+    credentials: /var/secrets/google/export-key.json
+  query:
+    project_id: my-project
+    generator_url: https://prometheus.example.com
+    credentials: /var/secrets/google/query-key.json
+
+rule_files:
+  - /etc/prometheus/rules/*.yml
+```
+
+<Tip>
+  You can use separate service accounts for export and query operations. This follows the principle of least privilege: the export account needs `roles/monitoring.metricWriter` and the query account needs `roles/monitoring.viewer`.
+</Tip>

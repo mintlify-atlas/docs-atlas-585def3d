@@ -1,0 +1,58 @@
+---
+title: "GMP Prometheus: architecture and GMP-specific additions"
+description: "GMP Prometheus is a GCP fork of Prometheus with a native GCM gRPC export pipeline. Covers architecture, GMP-specific additions, and upstream compatibility."
+---
+
+GMP Prometheus is a fork of [upstream Prometheus](https://github.com/prometheus/prometheus) maintained by Google Cloud. It adds an in-process export pipeline that sends scraped metrics directly to the [Google Cloud Monitoring (GCM) gRPC API](https://cloud.google.com/monitoring/api/ref_v3/rest), which powers Google Cloud Managed Service for Prometheus (GMP). All GMP-specific code lives in the `google/` subdirectory, keeping it separate from the upstream Prometheus codebase.
+
+<CardGroup cols={2}>
+  <Card title="Quickstart" icon="rocket" href="/quickstart">
+    Get Prometheus exporting metrics to GCM in a few steps.
+  </Card>
+  <Card title="Deployment" icon="server" href="/deployment">
+    Build the Docker image and deploy on Kubernetes or GKE.
+  </Card>
+  <Card title="GMP export configuration" icon="sliders" href="/configuration/gmp-export">
+    Configure the in-process GCM export pipeline and credentials.
+  </Card>
+  <Card title="prw2gcm proxy" icon="arrow-right-arrow-left" href="/components/prw2gcm-proxy">
+    Use the standalone Remote Write to GCM proxy component.
+  </Card>
+</CardGroup>
+
+## Architecture
+
+The central addition in GMP Prometheus is an in-process export pipeline that runs inside the Prometheus server process. After samples are scraped and written to the local WAL, the `google/export` package reads them and forwards them to the GCM `CreateTimeSeries` gRPC endpoint at `monitoring.googleapis.com:443`.
+
+The pipeline uses an internal sharding mechanism (1,024 shards by default) to buffer and batch samples before sending. Batches are capped at 200 samples — the GCM API quota limit for a single write request — and are flushed at most every 50 milliseconds even if the batch is not full. This keeps latency low while staying within quota.
+
+In addition to the in-process pipeline, the repository ships a standalone `prw2gcm` binary (`google/cmd/prw2gcm`). This proxy receives Prometheus Remote Write requests and forwards them to GCM, allowing any Prometheus-compatible agent to export to GMP without running this fork.
+
+The `google/` directory is structured as follows:
+
+| Package | Purpose |
+|---|---|
+| `google/export` | In-process WAL→GCM export pipeline |
+| `google/export/setup` | Flag registration and exporter initialization helpers |
+| `google/config` | Hot-reloadable GMP configuration types |
+| `google/lease` | Kubernetes-based master election for HA deployments |
+| `google/secrets` | Kubernetes secret provider for scalable secure scrape |
+| `google/cmd/prw2gcm` | Standalone Remote Write to GCM proxy binary |
+
+## GMP-specific additions
+
+The following capabilities were added on top of upstream Prometheus:
+
+- **In-process GCM export** (`google/export`): converts Prometheus samples to Cloud Monitoring time series and sends them via gRPC, exposing metrics such as `gcm_export_samples_exported_total` and `gcm_export_samples_sent_total` on the `/metrics` endpoint.
+- **prw2gcm proxy** (`google/cmd/prw2gcm`): a separate binary that translates Prometheus Remote Write 2.x requests into GCM `CreateTimeSeries` calls.
+- **Kubernetes secrets provider** (`google/secrets`): enables scalable secure scrape by reading TLS credentials from Kubernetes Secrets at scrape time.
+- **Lease / HA support** (`google/lease`): Kubernetes-backed leader election so that only one Prometheus replica sends data during a given time window, preventing duplicate series in GCM.
+- **Hot-reload configuration** (`google/config`): a `google_cloud` section in `prometheus.yml` that can be reloaded at runtime to update export credentials, compression settings, and series matchers without restarting the process.
+
+## Upstream compatibility
+
+The `main` branch of this repository tracks the upstream `prometheus/prometheus` `main` branch. All GMP-specific code is isolated in the `google/` subdirectory so that merging upstream changes is straightforward and does not touch the core Prometheus code paths.
+
+<Note>
+  This repository is a fork of [github.com/prometheus/prometheus](https://github.com/prometheus/prometheus). For upstream Prometheus documentation, configuration reference, and PromQL documentation, refer to the upstream repository. The Google team actively works on enabling vanilla Prometheus to work natively with GMP so that this fork can be reduced over time.
+</Note>

@@ -1,0 +1,132 @@
+---
+title: "ExporterOpts struct reference for the GCM export pipeline"
+description: "Reference for every field in the ExporterOpts and EfficiencyOpts structs that configure the in-process GCM export pipeline embedded in GMP Prometheus."
+---
+
+The `ExporterOpts` struct configures the in-process Google Cloud Monitoring (GCM) export pipeline embedded in GMP Prometheus. You pass these options programmatically when embedding the exporter, or via the corresponding [CLI flags](/reference/cli-flags) when running the `prometheus` binary. Each field maps directly to a flag exposed by `ExporterOptsFlags` in the `setup` package.
+
+## Core fields
+
+<ParamField body="Disable" type="bool" default="false">
+  Disables all export to GCM. When `true`, the exporter becomes a no-op and no metrics are sent. Useful for running GMP Prometheus purely as a local Prometheus server without GCM ingestion.
+</ParamField>
+
+<ParamField body="Endpoint" type="string" default="monitoring.googleapis.com:443">
+  The GCM API gRPC endpoint to send metric data to. Override this to point at a regional endpoint or a test double.
+</ParamField>
+
+<ParamField body="Compression" type="string" default="none">
+  The compression format used for gRPC requests. Accepted values are `"none"` and `"gzip"`. Using `"gzip"` can reduce bandwidth at the cost of additional CPU.
+</ParamField>
+
+## Authentication
+
+<ParamField body="CredentialsFile" type="string">
+  Path to a JSON service account credentials file used to authenticate with the GCM API. When set, this takes priority over `CredentialsFromJSON`.
+</ParamField>
+
+<ParamField body="CredentialsFromJSON" type="[]byte">
+  Service account credentials as raw JSON bytes. Use this when you cannot write a credentials file to disk — for example, when credentials are loaded from a secret manager at runtime. `CredentialsFile` takes priority over this field when both are set.
+</ParamField>
+
+<ParamField body="DisableAuth" type="bool" default="false">
+  Disables authentication entirely. Intended for debugging against a local GCM stub only. Do not enable in production.
+
+  <Warning>
+    Disabling authentication sends unauthenticated gRPC calls. Never set this in a production environment.
+  </Warning>
+</ParamField>
+
+<ParamField body="TokenURL" type="string">
+  The HTTP request URL used to generate an alternative GCE token. Set this together with `TokenBody` to export metrics to a project that differs from the one the instance is running in.
+</ParamField>
+
+<ParamField body="TokenBody" type="string">
+  The HTTP request body sent to `TokenURL` to obtain the alternative GCE token.
+</ParamField>
+
+<ParamField body="QuotaProject" type="string">
+  The GCP project ID to attribute quota consumption to. Useful when the service account belongs to a different project than the one receiving the metrics.
+</ParamField>
+
+## User agent
+
+<ParamField body="UserAgentProduct" type="string">
+  An additional product token appended to the standard user agent string sent with every GCM API request, following [RFC 7231 §5.5.3](https://www.rfc-editor.org/rfc/rfc7231#section-5.5.3) format.
+</ParamField>
+
+<ParamField body="UserAgentMode" type="string" default="unspecified">
+  A suffix added to the user agent that identifies the deployment mode. Valid values are:
+
+  | Value | Description |
+  |---|---|
+  | `gke` | Running on Google Kubernetes Engine |
+  | `kubectl` | Deployed via `kubectl` |
+  | `on-prem` | Running on Anthos on VMware |
+  | `baremetal` | Running on Anthos on bare metal |
+  | `unspecified` | Deployment mode not identified |
+</ParamField>
+
+<ParamField body="UserAgentEnv" type="string" default="unspecified">
+  A suffix added to the user agent that identifies the execution environment. Valid values are:
+
+  | Value | Description |
+  |---|---|
+  | `gke` | Running on GKE |
+  | `gce` | Running on Compute Engine |
+  | `unspecified` | Environment not identified |
+
+  When running on GCE or GKE, the `setup` package auto-populates this field from the GCP metadata server at startup. There is no corresponding CLI flag — set this field programmatically when embedding the exporter, or rely on auto-detection.
+</ParamField>
+
+## Monitored resource labels
+
+These fields set the default monitored resource labels attached to every exported time series. On GCE and GKE, the `setup` package attempts to auto-populate unset fields from the instance metadata server.
+
+<ParamField body="ProjectID" type="string">
+  The GCP project ID that receives the exported metrics. This value is set as the `project_id` dimension of the monitored resource. Prefer setting the `project_id` external label in your Prometheus configuration unless you need to override auto-detection.
+</ParamField>
+
+<ParamField body="Location" type="string">
+  The GCP region for the monitored resource. This field must be a named Google Cloud region such as `us-central1`. It cannot be set to `"global"`.
+
+  <Warning>
+    Setting `Location` to `"global"` is an error. Choose the Google Cloud region physically nearest to your cluster.
+  </Warning>
+</ParamField>
+
+<ParamField body="Cluster" type="string">
+  The cluster name label applied to all exported time series. Prefer setting the `cluster` external label in your Prometheus configuration unless you need to override auto-detection.
+</ParamField>
+
+## Filtering
+
+<ParamField body="Matchers" type="Matchers">
+  A list of Prometheus time series selectors. Only series that satisfy at least one matcher are exported to GCM. An empty list exports all series. The semantics match the `match[]` parameter of the Prometheus federation endpoint.
+
+  This field applies to the static flag-based configuration. At runtime the `ApplyConfig` method merges it with the `google_cloud.export` runtime configuration.
+</ParamField>
+
+<ParamField body="MetricTypePrefix" type="string" default="prometheus.googleapis.com">
+  The GCM metric type prefix prepended to all exported metric names. Changing this value alters how metrics appear in the GCM metric hierarchy. Use the default unless you have a specific reason to write under a different prefix.
+</ParamField>
+
+## Efficiency options
+
+`EfficiencyOpts` controls the internal data structure sizes of the export pipeline. These settings are intended for advanced users tuning memory and throughput. They are exposed on `ExporterOpts.Efficiency`.
+
+<Warning>
+  The `EfficiencyOpts` struct and its fields carry no compatibility guarantee. Field names, semantics, and defaults may change in future releases without notice.
+</Warning>
+
+<ParamField body="Efficiency.BatchSize" type="uint" default="200">
+  Maximum number of samples packed into a single GCM write request. The maximum allowed value is `200`, which matches the GCM quota limit for custom metric write requests. Setting this higher than `200` has no effect because GCM rejects oversized batches.
+</ParamField>
+
+<ParamField body="Efficiency.ShardCount" type="uint" default="1024">
+  Number of shards used to partition time series internally. Higher shard counts reduce lock contention under high cardinality but increase memory usage.
+</ParamField>
+
+<ParamField body="Efficiency.ShardBufferSize" type="uint" default="2048">
+  Per-shard queue depth. Each queue slot holds one sample plus its series hash. Increase this value if you observe samples being dropped due to a full shard buffer under high-throughput workloads.
+</ParamField>

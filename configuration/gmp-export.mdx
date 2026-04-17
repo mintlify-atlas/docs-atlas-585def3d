@@ -1,0 +1,191 @@
+---
+title: "Configure the GCM in-process metric export pipeline"
+description: "GCM export options for GMP Prometheus: credentials, endpoint, compression, project/location/cluster labels, metric filtering via match[], and efficiency tuning."
+---
+
+The GMP Prometheus fork ships an in-process exporter that forwards scraped and rule-evaluated time series to Google Cloud Monitoring (GCM) via a gRPC pipeline. You control the exporter through a combination of CLI flags (set at startup) and the hot-reloadable `google_cloud.export` section of `prometheus.yml`. CLI flags set at startup provide the baseline configuration; the `prometheus.yml` section can override a subset of those values at runtime without restarting the process.
+
+## prometheus.yml export section
+
+The following fields can be set under `google_cloud.export` in `prometheus.yml` and are applied on every configuration reload triggered by `SIGHUP` or `POST /-/reload`.
+
+```yaml prometheus.yml
+google_cloud:
+  export:
+    compression: gzip
+    credentials: /var/secrets/google/key.json
+    enable_match: true
+    match:
+      - '{job="prometheus"}'
+      - '{__name__=~"job:.*"}'
+```
+
+<ParamField path="google_cloud.export.compression" type="string" default="none">
+  Compression format for gRPC requests to the GCM API. Accepted values are `none` and `gzip`. When set in the config file, this overrides the `--export.compression` flag and causes the gRPC metric client to be recreated.
+</ParamField>
+
+<ParamField path="google_cloud.export.credentials" type="string">
+  Path to a service account JSON credentials file for authenticating with the GCM API. When set in the config file, this overrides the `--export.credentials-file` flag and causes the gRPC metric client to be recreated. If neither this field nor the flag is set, Application Default Credentials are used.
+</ParamField>
+
+<ParamField path="google_cloud.export.enable_match" type="boolean">
+  Controls whether the `match` list in this config section is applied.
+
+  - **Not set (omitted):** The `match` list is ignored; whatever matchers were set via `--export.match` flags remain in effect.
+  - **`false`:** Filtering is explicitly disabled; all series are exported regardless of any `--export.match` flags.
+  - **`true`:** The `match` list in this config section is used and overwrites all `--export.match` flag values.
+</ParamField>
+
+<ParamField path="google_cloud.export.match" type="string[]">
+  A list of Prometheus metric selectors. Only time series that match at least one selector are exported. Effective only when `enable_match: true`. Each entry follows the same syntax as Prometheus federation `match[]` parameters. External labels are excluded from matching.
+
+  Example: `'{job="prometheus"}'`
+</ParamField>
+
+<Warning>
+  Metric filtering via `enable_match` / `match` is an opt-in feature that is prone to misconfiguration. If you accidentally exclude a metric that is referenced by an alerting rule, the rule will silently stop firing. Review your matchers carefully before enabling this feature in production.
+</Warning>
+
+## CLI flags
+
+CLI flags are set at process startup and provide the base configuration. They can be passed directly to the `prometheus` binary or injected via the `EXTRA_ARGS` environment variable (deprecated).
+
+```bash
+prometheus \
+  --export.endpoint="monitoring.googleapis.com:443" \
+  --export.compression="none" \
+  --export.credentials-file="/var/secrets/google/key.json" \
+  --export.label.project-id="my-project" \
+  --export.label.location="us-central1" \
+  --export.label.cluster="prod-cluster"
+```
+
+### Core options
+
+<ParamField path="--export.disable" type="boolean" default="false">
+  Disable exporting to GCM entirely. When set, the in-process exporter is created but immediately becomes a no-op. Useful for local development or testing. Cannot be overridden by hot-reload.
+</ParamField>
+
+<ParamField path="--export.endpoint" type="string" default="monitoring.googleapis.com:443">
+  GCM API endpoint to send metric data to. Useful when routing traffic through a proxy or VPC Service Controls endpoint.
+</ParamField>
+
+<ParamField path="--export.compression" type="string" default="none">
+  The compression format for gRPC requests. Valid values are `none` and `gzip`. Can be overridden at runtime by `google_cloud.export.compression` in `prometheus.yml`.
+</ParamField>
+
+<ParamField path="--export.credentials-file" type="string">
+  Path to a service account JSON credentials file. Can be overridden at runtime by `google_cloud.export.credentials` in `prometheus.yml`. When not set, the exporter falls back to Application Default Credentials.
+</ParamField>
+
+### Resource labels
+
+These flags set default monitored-resource label values on all exported time series. Values set via `global.external_labels` in `prometheus.yml` take precedence over these flags. On GKE and GCE, values are auto-discovered from the instance metadata server if not explicitly set.
+
+<ParamField path="--export.label.project-id" type="string">
+  Default GCP project ID for all exported data. Prefer setting `project_id` in `global.external_labels` instead unless you rely on metadata auto-discovery.
+</ParamField>
+
+<ParamField path="--export.label.location" type="string">
+  Default Google Cloud region or zone for all exported data. Cannot be `"global"`. Prefer setting `location` in `global.external_labels` instead.
+</ParamField>
+
+<ParamField path="--export.label.cluster" type="string">
+  Default cluster name for all scraped targets. Prefer setting `cluster` in `global.external_labels` instead.
+</ParamField>
+
+### Authentication and quota
+
+<ParamField path="--export.token-url" type="string">
+  Request URL used to generate an alternative token for exporting metrics to a project. Must be set together with `--export.token-body`.
+</ParamField>
+
+<ParamField path="--export.token-body" type="string">
+  Request body used to generate an alternative token. Must be set together with `--export.token-url`.
+</ParamField>
+
+<ParamField path="--export.quota-project" type="string">
+  The project ID to use for quota attribution. Useful when exporting to a project that is different from the one owning the credentials.
+</ParamField>
+
+<ParamField path="--export.user-agent-mode" type="string" default="unspecified">
+  Mode appended to the gRPC user agent string. Valid values are `unspecified`, `gke`, `kubectl`, `on-prem`, and `baremetal`. Used for analytics by the GCM API.
+</ParamField>
+
+### Metric filtering
+
+<ParamField path="--export.match" type="string" default="">
+  A Prometheus time series matcher. Can be repeated. A time series must match at least one matcher to be exported. Uses the same selector syntax as Prometheus federation `match[]`. External labels are excluded from matching. This flag can be overridden at runtime by `google_cloud.export.enable_match` and `google_cloud.export.match` in `prometheus.yml`.
+
+  Example: `--export.match='{job="prometheus"}' --export.match='{__name__=~"job:.*"}'`
+</ParamField>
+
+## Metric filtering
+
+Metric filtering lets you reduce the volume of data sent to Cloud Monitoring by exporting only a subset of time series. A series is exported if it matches **at least one** selector in the list.
+
+```yaml prometheus.yml
+google_cloud:
+  export:
+    enable_match: true
+    match:
+      - '{job="prometheus"}'
+      - '{__name__=~"job:.*"}'
+```
+
+Selectors follow the standard Prometheus label matcher syntax:
+
+| Operator | Meaning              | Example                       |
+|----------|----------------------|-------------------------------|
+| `=`      | Exact match          | `job="prometheus"`            |
+| `!=`     | Not equal            | `job!="kube-state-metrics"`   |
+| `=~`     | Regex match          | `__name__=~"http_.*"`         |
+| `!~`     | Negative regex match | `__name__!~"go_.*"`           |
+
+<Note>
+  Filtering operates on the series cache that feeds the export pipeline. Series that do not match are still ingested into Prometheus local storage; they are simply not forwarded to Cloud Monitoring. To filter at the scrape level instead, use `metric_relabel_configs` in the relevant `scrape_configs` entry.
+</Note>
+
+## Compression
+
+By default, gRPC requests are sent to the GCM API without compression (`none`). Enabling `gzip` reduces bandwidth at the cost of additional CPU usage on the Prometheus process.
+
+```yaml prometheus.yml
+google_cloud:
+  export:
+    compression: gzip
+```
+
+When the compression setting changes on a hot-reload, the exporter recreates the internal gRPC metric client. The existing TCP connection is closed and a new one is established, which incurs a brief reconnect. Under normal load this is imperceptible.
+
+## Efficiency tuning
+
+The following flags expose internal data structure sizes. They are intended for advanced users only. There is no compatibility guarantee — the defaults or semantics may change in future releases.
+
+<Warning>
+  Do not adjust these values unless you have a specific, measured reason to do so. Incorrect values can degrade export throughput or increase memory usage.
+</Warning>
+
+<ParamField path="--export.debug.batch-size" type="number" default="200">
+  Maximum number of time series points to pack into a single CreateTimeSeries RPC call. The maximum value is `200`, which matches the GCM API quota for write request size. Reducing this value increases the number of RPCs for the same data volume.
+</ParamField>
+
+<ParamField path="--export.debug.shard-count" type="number" default="1024">
+  Number of shards into which time series are bucketed before being sent. A higher shard count provides more parallelism but uses more memory. Series are distributed across shards by hash to ensure ordering guarantees within each shard.
+</ParamField>
+
+<ParamField path="--export.debug.shard-buffer-size" type="number" default="2048">
+  Buffer (queue) size for each individual shard. Each element in the buffer holds one sample and its hash. When a shard's buffer is full, new samples for that shard are dropped until space is available.
+</ParamField>
+
+<ParamField path="--export.debug.metric-prefix" type="string" default="prometheus.googleapis.com">
+  The Google Cloud Monitoring metric type prefix prepended to all exported metric names.
+</ParamField>
+
+<ParamField path="--export.debug.disable-auth" type="boolean" default="false">
+  Disable authentication for all GCM API requests. Intended for debugging only. Cannot be overridden by hot-reload.
+</ParamField>
+
+<ParamField path="--export.debug.fetch-metadata-timeout" type="duration" default="10s">
+  Total timeout for the initial best-effort fetch of GCP metadata (project ID, cluster name, location) from the instance metadata server at startup. Keep this shorter than your readiness and liveness probe timeouts.
+</ParamField>

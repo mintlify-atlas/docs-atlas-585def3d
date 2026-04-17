@@ -1,0 +1,198 @@
+---
+title: "CLI flags reference: prometheus and prw2gcm binaries"
+description: "Complete reference for all GMP-specific CLI flags: export.*, export.ha.*, and export.debug.* flags on the prometheus binary, and all prw2gcm proxy flags."
+---
+
+This page documents only the GMP-added flags — the flags that configure Google Cloud Monitoring export and high-availability coordination. It does not cover the full set of upstream Prometheus flags. For upstream flags, refer to the [Prometheus documentation](https://prometheus.io/docs/prometheus/latest/command-line/prometheus/).
+
+## prometheus server flags
+
+The following flags are registered by `ExporterOptsFlags` and `HAOptions.SetupFlags` in the `setup` package. They are available on the GMP `prometheus` binary.
+
+### Export control
+
+<ParamField query="export.disable" type="bool" default="false">
+  Disables all export to GCM. When set, the binary runs as a standard local Prometheus server with no GCM ingestion.
+</ParamField>
+
+<ParamField query="export.endpoint" type="string" default="monitoring.googleapis.com:443">
+  GCM API gRPC endpoint to send metric data to. Override to use a regional endpoint or a test stub.
+</ParamField>
+
+<ParamField query="export.compression" type="string" default="none">
+  Compression format for gRPC requests. Accepted values: `none`, `gzip`.
+</ParamField>
+
+### Authentication
+
+<ParamField query="export.credentials-file" type="string">
+  Path to a JSON service account credentials file for authenticating with the GCM API. When omitted, Application Default Credentials are used.
+</ParamField>
+
+<ParamField query="export.token-url" type="string">
+  HTTP request URL used to obtain an alternative GCE token. Use together with `--export.token-body` to export to a project different from the one the instance belongs to.
+</ParamField>
+
+<ParamField query="export.token-body" type="string">
+  HTTP request body sent to `--export.token-url` when obtaining the alternative GCE token.
+</ParamField>
+
+<ParamField query="export.quota-project" type="string">
+  GCP project ID to which quota consumption is attributed. Useful when the service account belongs to a different project than the one receiving the metrics.
+</ParamField>
+
+### Monitored resource labels
+
+These flags set the default monitored resource labels attached to every exported time series. On GCE and GKE, unset fields are auto-populated from the instance metadata server.
+
+<ParamField query="export.label.project-id" type="string">
+  Default GCP project ID for all exported data. Prefer setting the `project_id` external label in your Prometheus configuration if you are not relying on auto-detection.
+</ParamField>
+
+<ParamField query="export.label.location" type="string">
+  Default GCP region for all exported data. Must be a named region such as `us-central1`; cannot be `global`. Prefer setting the `location` external label in your Prometheus configuration if you are not relying on auto-detection.
+</ParamField>
+
+<ParamField query="export.label.cluster" type="string">
+  Default cluster name for all scraped targets. Prefer setting the `cluster` external label in your Prometheus configuration if you are not relying on auto-detection.
+</ParamField>
+
+### Filtering
+
+<ParamField query="export.match" type="string">
+  A Prometheus time series matcher. Only series satisfying at least one matcher are exported. An empty value exports all series. This flag is repeatable — pass it multiple times to specify several matchers.
+
+  ```bash
+  --export.match='{job="prometheus"}' \
+  --export.match='{__name__=~"job:.*"}'
+  ```
+
+  External labels are excluded from matcher evaluation. This flag can be overridden at runtime by the `google_cloud.export` configuration block.
+
+  <Note>
+    This flag is registered as hidden and does not appear in `--help` output. It is fully functional — the hidden designation reflects that it is an advanced option prone to misconfiguration.
+  </Note>
+</ParamField>
+
+### User agent
+
+<ParamField query="export.user-agent-mode" type="string" default="unspecified">
+  Deployment mode identifier included in the GCM API user agent. Valid values: `gke`, `kubectl`, `on-prem`, `baremetal`, `unspecified`.
+</ParamField>
+
+<Note>
+  The user agent environment identifier (GKE vs GCE vs unspecified) is set automatically at startup by reading the GCP metadata server. It is not a CLI flag and cannot be overridden from the command line.
+</Note>
+
+### Debug flags
+
+The following flags are intended for advanced tuning and debugging. They correspond to the `EfficiencyOpts` fields and carry no compatibility guarantee.
+
+<ParamField query="export.debug.metric-prefix" type="string" default="prometheus.googleapis.com">
+  GCM metric type prefix prepended to all exported metric names.
+</ParamField>
+
+<ParamField query="export.debug.disable-auth" type="bool" default="false">
+  Disables GCM API authentication. For debugging against a local stub only.
+
+  <Warning>
+    Never enable this flag in production. It sends unauthenticated gRPC calls to the GCM endpoint.
+  </Warning>
+</ParamField>
+
+<ParamField query="export.debug.batch-size" type="uint" default="200">
+  Maximum number of samples per GCM write request. The GCM quota cap is 200; values above this are rejected by the API.
+</ParamField>
+
+<ParamField query="export.debug.shard-count" type="uint" default="1024">
+  Number of internal shards used to partition time series. Higher values reduce lock contention at the cost of memory.
+</ParamField>
+
+<ParamField query="export.debug.shard-buffer-size" type="uint" default="2048">
+  Per-shard queue depth. Each slot holds one sample and its series hash.
+</ParamField>
+
+<ParamField query="export.debug.fetch-metadata-timeout" type="duration" default="10s">
+  Total timeout for the startup metadata server fetch used to auto-populate project ID, location, cluster name, and user agent information. Keep this shorter than your readiness and liveness probe deadlines.
+</ParamField>
+
+### High-availability flags
+
+GMP supports an HA setup where two Prometheus replicas share a distributed lease so that only one sends data to GCM at any given time.
+
+<ParamField query="export.ha.backend" type="string" default="none">
+  HA coordination backend. Valid values:
+
+  | Value | Description |
+  |---|---|
+  | `none` | No HA coordination; all data is always sent |
+  | `kube` | Kubernetes lease-based leader election |
+</ParamField>
+
+<ParamField query="export.ha.kube.config" type="string">
+  Path to a kubeconfig file. When omitted, in-cluster configuration is used, falling back to `~/.kube/config`.
+</ParamField>
+
+<ParamField query="export.ha.kube.namespace" type="string">
+  Kubernetes namespace where the lease resource is created. Must be identical across all replicas. Can also be set via the `KUBE_NAMESPACE` environment variable.
+</ParamField>
+
+<ParamField query="export.ha.kube.name" type="string">
+  Name of the Kubernetes lease resource. Must be identical across all replicas. Can also be set via the `KUBE_NAME` environment variable.
+</ParamField>
+
+<ParamField query="export.ha.lease-duration" type="duration" default="15s">
+  Duration that non-leader replicas wait before attempting to acquire the lease. Can also be set via the `LEASE_DURATION` environment variable.
+</ParamField>
+
+<ParamField query="export.ha.renew-deadline" type="duration" default="10s">
+  Duration that the leader retries refreshing the lease before giving up. Can also be set via the `RENEW_DEADLINE` environment variable.
+</ParamField>
+
+<ParamField query="export.ha.retry-period" type="duration" default="2s">
+  Duration between lease renewal retries. Can also be set via the `RETRY_PERIOD` environment variable.
+</ParamField>
+
+### EXTRA\_ARGS environment variable
+
+<Note>
+  `EXTRA_ARGS` is deprecated and will be removed in a future release. Use CLI flags or the `ExporterOpts` struct directly instead.
+</Note>
+
+The `EXTRA_ARGS` environment variable lets you inject additional command-line arguments when you cannot modify the binary's argument list directly. It is parsed with shell-like quoting rules.
+
+```bash
+EXTRA_ARGS="--export.label.project-id=my-project --export.label.location=us-central1"
+```
+
+## prw2gcm proxy flags
+
+`prw2gcm` is a standalone Remote Write 2.x → GCM proxy. It accepts the standard Go `flag` package flags listed below.
+
+<ParamField query="listen-address" type="string" default=":19091">
+  Address and port on which `prw2gcm` listens for incoming Remote Write 2.x requests and exposes its own `/metrics` endpoint.
+</ParamField>
+
+<ParamField query="log.level" type="string" default="info">
+  Log verbosity. Valid values: `debug`, `info`, `warn`, `error`.
+</ParamField>
+
+<ParamField query="gcm.forward-credentials" type="bool" default="false">
+  Enables credential-forwarding mode. When set, the proxy expects an HTTP `Authorization: Bearer <token>` header on every incoming Remote Write request and forwards the token to the GCM gRPC call. This allows running `prw2gcm` as a Prometheus sidecar that uses Prometheus's own `remote_write` authentication.
+
+  <Warning>
+    In credential-forwarding mode, serve `prw2gcm` behind TLS in untrusted network environments. The bearer token is sensitive and must not transit unencrypted links.
+  </Warning>
+</ParamField>
+
+<ParamField query="gcm.credentials-file" type="string">
+  Path to a JSON credentials file (service account or refresh token). When omitted, Application Default Credentials must have sufficient permission to write to GCM.
+</ParamField>
+
+<ParamField query="gcm.endpoint" type="string" default="monitoring.googleapis.com:443">
+  GCM API gRPC endpoint to forward metric data to.
+</ParamField>
+
+<ParamField query="gcm.user-agent-mode" type="string" default="unspecified">
+  Deployment mode identifier included in the GCM API user agent. Valid values: `gke`, `kubectl`, `on-prem`, `baremetal`, `unspecified`.
+</ParamField>

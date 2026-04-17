@@ -1,0 +1,100 @@
+---
+title: "Monitor the GCM export pipeline with gcm_export_ metrics"
+description: "All 13 gcm_export_* metrics from GMP Prometheus: counters for throughput and errors, a gauge for in-flight requests, and histograms for batch sizes."
+---
+
+The GMP Prometheus server instruments its own GCM export pipeline and exposes the resulting metrics on the standard `/metrics` endpoint under the `gcm_export_` prefix. You can scrape these metrics with any Prometheus instance — including the GMP server itself — to build dashboards and alerts that give you full visibility into export throughput, drop rates, error rates, and in-flight request depth.
+
+## Available metrics
+
+The following metrics are registered by the export pipeline in `google/export/export.go`.
+
+### Counters
+
+These metrics only increase over time. Use `rate()` to compute per-second rates.
+
+| Metric | Labels | Description |
+|--------|--------|-------------|
+| `gcm_export_samples_exported_total` | — | Number of samples exported at scrape time. Incremented each time the export pipeline accepts a sample from the scrape loop. |
+| `gcm_export_exemplars_exported_total` | — | Number of exemplars exported at scrape time. |
+| `gcm_export_samples_dropped_total` | `reason` | Number of samples intentionally dropped before being sent. The `reason` label explains why (for example, missing required labels or unsupported metric type). |
+| `gcm_export_exemplars_dropped_total` | `reason` | Number of exemplars intentionally dropped. The `reason` label mirrors the same set of reasons as sample drops. |
+| `gcm_export_samples_sent_total` | — | Number of samples successfully sent to GCM. A sample counts here only after GCM acknowledges the write RPC. |
+| `gcm_export_samples_send_errors_total` | `project_id` | Number of errors encountered while sending samples to GCM, broken down by GCP project. |
+| `gcm_export_send_iterations_total` | — | Number of processing iterations of the sample export send handler. Useful for measuring the cadence of the export loop. |
+| `gcm_export_shard_process_total` | — | Number of shard retrievals. The export pipeline divides pending samples across shards before batching. |
+| `gcm_export_shard_process_pending_total` | — | Number of shard retrievals that returned an empty result. A high value relative to `gcm_export_shard_process_total` may indicate low scrape volume or a stalled pipeline. |
+
+### Gauge
+
+| Metric | Labels | Description |
+|--------|--------|-------------|
+| `gcm_export_pending_requests` | — | Number of in-flight write requests to GCM at any given moment. A sustained high value can indicate GCM is throttling or rejecting requests. |
+
+### Histograms
+
+These metrics expose `_bucket`, `_count`, and `_sum` series. Use them to compute percentile latencies and size distributions.
+
+| Metric | Buckets | Description |
+|--------|---------|-------------|
+| `gcm_export_shard_process_samples_taken` | 1, 2, 5, 10, 20, 50, 100, 150, 200 | Number of samples taken when processing a single shard. Capped at 200, which is the maximum GCM batch size. |
+| `gcm_export_projects_per_batch` | 1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024 | Number of distinct GCP projects in each batch sent to GCM. Useful when GMP is exporting for multiple projects simultaneously. |
+| `gcm_export_samples_per_rpc_batch` | 1, 2, 5, 10, 20, 50, 100, 150, 200 | Number of samples packed into a single GCM write RPC. A consistently low value may indicate that the export pipeline is flushing batches before they fill. |
+
+## Example PromQL queries
+
+The following queries can be used directly in Prometheus or in Cloud Monitoring when these metrics are themselves exported to GCM.
+
+**Export throughput** — samples successfully delivered to GCM per second:
+
+```promql
+rate(gcm_export_samples_sent_total[5m])
+```
+
+**Drop rate** — samples dropped per second, grouped by reason:
+
+```promql
+rate(gcm_export_samples_dropped_total[5m])
+```
+
+**Error rate** — send errors per second, grouped by GCP project:
+
+```promql
+rate(gcm_export_samples_send_errors_total[5m])
+```
+
+**In-flight requests** — current number of pending GCM write calls:
+
+```promql
+gcm_export_pending_requests
+```
+
+**Batch fill efficiency** — 99th-percentile samples per RPC batch:
+
+```promql
+histogram_quantile(0.99, rate(gcm_export_samples_per_rpc_batch_bucket[5m]))
+```
+
+## Recommended alerts
+
+The two most actionable signals for the export pipeline are a non-zero drop rate and a non-zero error rate.
+
+**Alert on dropped samples:**
+
+```promql
+rate(gcm_export_samples_dropped_total[5m]) > 0
+```
+
+When this fires, check the `reason` label to understand why samples are being discarded. Common reasons include unsupported metric types and missing required resource labels.
+
+**Alert on send errors:**
+
+```promql
+rate(gcm_export_samples_send_errors_total[5m]) > 0
+```
+
+When this fires, check the `project_id` label to identify which GCP project is experiencing failures. Typical causes are IAM permission errors, invalid credentials, or GCM quota exhaustion.
+
+<Tip>
+  To avoid alert fatigue during brief transient errors, consider wrapping both alerts with `for: 5m` so they only page when the condition persists.
+</Tip>

@@ -1,80 +1,137 @@
 ---
-title: "Quickstart"
-description: "Start building awesome documentation in minutes"
+title: "Quickstart: export Prometheus metrics to Google Cloud"
+description: "Get GMP Prometheus exporting scraped metrics to Google Cloud Monitoring in four steps: set external labels, configure credentials, start the binary, and verify."
 ---
 
-## Get started in three steps
+This quickstart walks you through the minimum steps needed to run GMP Prometheus and have it export scraped metrics to Google Cloud Monitoring (GCM). By the end you will have a running Prometheus instance that sends data to your GCP project under the `prometheus.googleapis.com/` metric prefix.
 
-Get your documentation site running locally and make your first customization.
+<Warning>
+  The `location` external label must be set to a named Google Cloud region such as `us-central1`. Setting it to `"global"` is not allowed and will cause the exporter to return an error on startup. Choose the region physically nearest to your deployment.
+</Warning>
 
-### Step 1: Set up your local environment
+<Steps>
+  <Step title="Configure external labels in prometheus.yml">
+    GMP uses the `project_id` and `location` external labels to determine which GCP project and region metrics are written to. Add them to the `global.external_labels` section of your `prometheus.yml`.
 
-<AccordionGroup>
-  <Accordion icon="copy" title="Clone your docs locally">
-    During the onboarding process, you created a GitHub repository with your docs content if you didn't already have one. You can find a link to this repository in your [dashboard](https://dashboard.mintlify.com).
-    
-    To clone the repository locally so that you can make and preview changes to your docs, follow the [Cloning a repository](https://docs.github.com/en/repositories/creating-and-managing-repositories/cloning-a-repository) guide in the GitHub docs.
-  </Accordion>
-  <Accordion icon="rectangle-terminal" title="Start the preview server">
-    1. Install the Mintlify CLI: `npm i -g mint`
-    2. Navigate to your docs directory and run: `mint dev`
-    3. Open `http://localhost:3000` to see your docs live!
-    
-    <Tip>Your preview updates automatically as you edit files.</Tip>
-  </Accordion>
-</AccordionGroup>
+    ```yaml prometheus.yml
+    global:
+      scrape_interval: 15s
+      evaluation_interval: 15s
+      external_labels:
+        project_id: your-gcp-project-id
+        location: us-central1   # must be a named region, not "global"
 
-### Step 2: Deploy your changes
+    scrape_configs:
+      - job_name: "prometheus"
+        static_configs:
+          - targets: ["localhost:9090"]
+    ```
 
-<AccordionGroup>
-  <Accordion icon="github" title="Install our GitHub app">
-    Install the Mintlify GitHub app from your [dashboard](https://dashboard.mintlify.com/settings/organization/github-app).
-    
-    Our GitHub app automatically deploys your changes to your docs site, so you don't need to manage deployments yourself.
-</Accordion>
-<Accordion icon="palette" title="Update your site name and colors">
-    For a first change, let's update the name and colors of your docs site.
+    The `location` value should match the Google Cloud region where your workload runs — for example `us-central1`, `europe-west1`, or `asia-east1`. You can optionally add a `cluster` external label to populate the monitored resource's cluster field.
+  </Step>
 
-    1. Open `docs.json` in your editor.
-    2. Change the `"name"` field to your project name.
-    3. Update the `"colors"` to match your brand.
-    4. Save and see your changes instantly at `http://localhost:3000`.
+  <Step title="Obtain GCP credentials">
+    The exporter authenticates with the GCM API using Google Cloud credentials. There are two supported methods:
 
-    <Tip>Try changing the primary color to see an immediate difference!</Tip>
-  </Accordion>
-</AccordionGroup>
+    **Service account JSON key file**
 
-### Step 3: Go live
+    Create a service account with the `roles/monitoring.metricWriter` IAM role and download a JSON key file:
 
-<Accordion icon="rocket" title="Publish your docs">
-  1. Commit and push your changes.
-  2. Your docs will update and be live in moments!
-</Accordion>
+    ```bash
+    gcloud iam service-accounts create prometheus-gmp \
+      --display-name="GMP Prometheus exporter"
 
-## Next steps
+    gcloud projects add-iam-policy-binding your-gcp-project-id \
+      --member="serviceAccount:prometheus-gmp@your-gcp-project-id.iam.gserviceaccount.com" \
+      --role="roles/monitoring.metricWriter"
 
-Now that you have your docs running, explore these key features:
+    gcloud iam service-accounts keys create /etc/prometheus/gcp-credentials.json \
+      --iam-account=prometheus-gmp@your-gcp-project-id.iam.gserviceaccount.com
+    ```
 
-<CardGroup cols={2}>
+    **Workload Identity (GKE)**
 
-<Card title="Write Content" icon="pen-to-square" href="/essentials/markdown">
-  Learn MDX syntax and start writing your documentation.
-</Card>
+    On GKE you can bind a Kubernetes ServiceAccount to a GCP service account so that no key file is needed. See the tip below.
 
-<Card title="Customize style" icon="palette" href="/essentials/settings">
-  Make your docs match your brand perfectly.
-</Card>
+    <Tip>
+      On GKE with Workload Identity enabled, you do not need a credentials file. Annotate your Kubernetes ServiceAccount with `iam.gke.io/gcp-service-account: prometheus-gmp@your-gcp-project-id.iam.gserviceaccount.com` and bind it to the GCP service account using `gcloud iam service-accounts add-iam-policy-binding`. The GMP Prometheus binary will automatically pick up credentials from the metadata server.
+    </Tip>
+  </Step>
 
-<Card title="Add code examples" icon="square-code" href="/essentials/code">
-  Include syntax-highlighted code blocks.
-</Card>
+  <Step title="Run GMP Prometheus">
+    Start the binary with the `--export.label.project-id`, `--export.label.location`, and (when using a key file) `--export.credentials-file` flags. These flags set the GCM monitored resource fields and point the exporter to your credentials.
 
-<Card title="API documentation" icon="code" href="/api-reference/introduction">
-  Auto-generate API docs from OpenAPI specs.
-</Card>
+    ```bash
+    ./prometheus \
+      --config.file=/etc/prometheus/prometheus.yml \
+      --storage.tsdb.path=/prometheus \
+      --export.label.project-id=your-gcp-project-id \
+      --export.label.location=us-central1 \
+      --export.credentials-file=/etc/prometheus/gcp-credentials.json
+    ```
 
-</CardGroup>
+    The flags `--export.label.project-id` and `--export.label.location` take precedence over the external labels in `prometheus.yml` for the GCM monitored resource, but setting them in `prometheus.yml` as well is recommended so that the labels are also available inside Prometheus for querying and alerting.
 
-<Note>
-  **Need help?** See our [full documentation](https://mintlify.com/docs) or join our [community](https://mintlify.com/community).
-</Note>
+    The exporter connects to `monitoring.googleapis.com:443` by default. You can override this with `--export.endpoint` if you are using a private endpoint.
+  </Step>
+
+  <Step title="Verify export">
+    After Prometheus starts, confirm that metrics are being sent to GCM by querying the `gcm_export_samples_exported_total` counter on the `/metrics` endpoint:
+
+    ```bash
+    curl -s http://localhost:9090/metrics | grep gcm_export_samples_exported_total
+    ```
+
+    You should see output similar to:
+
+    ```text
+    # HELP gcm_export_samples_exported_total Number of samples exported at scrape time.
+    # TYPE gcm_export_samples_exported_total counter
+    gcm_export_samples_exported_total 12345
+    ```
+
+    A steadily increasing value confirms that samples are being picked up by the export pipeline. You can also check `gcm_export_samples_sent_total` to verify they are reaching GCM and `gcm_export_samples_send_errors_total` to diagnose any send failures.
+
+    In the Google Cloud Console, navigate to **Monitoring → Metrics Explorer** and query `prometheus.googleapis.com/up/gauge` to see your data.
+  </Step>
+</Steps>
+
+## Example prometheus.yml
+
+The following is the full example configuration shipped with the repository at `documentation/examples/prometheus.yml`. It includes the required `project_id` and `location` external labels and a scrape job for the Prometheus server itself.
+
+```yaml prometheus.yml
+# my global config
+global:
+  scrape_interval: 15s # Set the scrape interval to every 15 seconds. Default is every 1 minute.
+  evaluation_interval: 15s # Evaluate rules every 15 seconds. The default is every 1 minute.
+  # scrape_timeout is set to the global default (10s).
+  # GMP requires settings project_id and location labels.
+  external_labels:
+    project_id: example-project
+    location: us-central-1
+
+# Alertmanager configuration
+alerting:
+  alertmanagers:
+    - static_configs:
+        - targets:
+          # - alertmanager:9093
+
+# Load rules once and periodically evaluate them according to the global 'evaluation_interval'.
+rule_files:
+  # - "first_rules.yml"
+  # - "second_rules.yml"
+
+# A scrape configuration containing exactly one endpoint to scrape:
+# Here it's Prometheus itself.
+scrape_configs:
+  # The job name is added as a label `job=<job_name>` to any timeseries scraped from this config.
+  - job_name: "prometheus"
+
+    # metrics_path defaults to '/metrics'
+    # scheme defaults to 'http'.
+
+    static_configs:
+      - targets: ["localhost:9090"]
+```

@@ -1,0 +1,96 @@
+{
+  "projectType": "infrastructure",
+  "projectName": "GMP Prometheus",
+  "projectDescription": "A GCP fork of Prometheus that exports metrics to Google Cloud Managed Service for Prometheus (GMP) via an in-memory GCM export pipeline.",
+  "theme": "aspen",
+  "primaryColor": "#f69513",
+  "lightColor": "#4384f5",
+  "darkColor": "#39a958",
+  "navigation": {
+    "tabs": [
+      {
+        "tab": "Documentation",
+        "groups": [
+          {
+            "group": "Get Started",
+            "pages": [
+              "introduction",
+              "quickstart",
+              "deployment"
+            ]
+          },
+          {
+            "group": "Configuration",
+            "pages": [
+              "configuration/prometheus-config",
+              "configuration/gmp-export",
+              "configuration/gmp-query",
+              "configuration/ha-and-lease"
+            ]
+          },
+          {
+            "group": "Components",
+            "pages": [
+              "components/prometheus-server",
+              "components/prw2gcm-proxy",
+              "components/promtool",
+              "components/kubernetes-secrets"
+            ]
+          },
+          {
+            "group": "Operations",
+            "pages": [
+              "operations/building",
+              "operations/monitoring",
+              "operations/troubleshooting"
+            ]
+          }
+        ]
+      },
+      {
+        "tab": "Reference",
+        "groups": [
+          {
+            "group": "API & CLI Reference",
+            "pages": [
+              "reference/exporter-opts",
+              "reference/cli-flags",
+              "reference/metrics"
+            ]
+          },
+          {
+            "group": "PromQL",
+            "pages": [
+              "reference/promql-basics",
+              "reference/promql-functions"
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  "keyFeatures": [
+    "In-process export of Prometheus metrics to Google Cloud Monitoring (GCM) gRPC API",
+    "Remote Write 2.x to GCM proxy (prw2gcm) for sidecar deployments",
+    "Hot-reloadable GMP export and query configuration",
+    "Kubernetes-native secret provider for secure scrape credentials",
+    "HA master-election via configurable lease backends (none or Kubernetes)",
+    "Full upstream Prometheus compatibility: scraping, PromQL, alerting, TSDB",
+    "Metric type prefix and monitored resource label mapping for GCM",
+    "Docker-based multi-stage build with BoringCrypto FIPS support"
+  ],
+  "publicApiSurface": [
+    "export.Exporter — core GCM export struct",
+    "export.ExporterOpts — configuration options for the exporter",
+    "export.NopExporter() — returns a permanently disabled exporter",
+    "export.Exporter.Export(ctx, records) — exports WAL records to GCM",
+    "export.Exporter.ApplyConfig(cfg) — hot-reloads exporter configuration",
+    "setup.ExporterOptsFlags(app, opts) — registers CLI flags for exporter",
+    "setup.SetGlobal(exporter) / setup.Global() — global exporter accessor",
+    "google/config.GoogleCloudConfig — YAML config struct for GMP options",
+    "google/lease.Lease interface — Range() / Run() for HA election",
+    "prw2gcm — Remote Write 2.x to GCM proxy binary",
+    "prometheus — GMP-enabled Prometheus server binary",
+    "promtool — Prometheus tooling CLI"
+  ]
+}
